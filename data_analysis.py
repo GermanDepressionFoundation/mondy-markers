@@ -20,7 +20,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 def ensure_results_dir():
-    os.makedirs("results/", exist_ok=True)
+    os.makedirs("results/models", exist_ok=True)
 
 
 def prepare_data(df, target_column):
@@ -57,7 +57,7 @@ def evaluate_and_plot_parity(y_true, y_pred, r2, mae, pseudonym, model_name, suf
     plt.title(f"Parity Plot\nR² = {r2:.2f}, MAE = {mae:.2f} | n_test = {len(y_true)}")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"results/{pseudonym}_{suffix}_{model_name}_parity.png", dpi=300)
+    plt.savefig(f"results/models/{pseudonym}_{suffix}_{model_name}_parity.png", dpi=300)
     plt.close()
 
 
@@ -75,18 +75,18 @@ def plot_elasticnet_coefficients(feature_names, coefficients, pseudonym):
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_02_elasticnet_feature_importance.png",
+        f"results/models/{pseudonym}_02_elasticnet_feature_importance.png",
         dpi=300,
     )
     plt.close()
 
 
-def plot_shap_summary_and_bar(shap_values, X_test_prep, feature_names, pseudonym):
+def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     plt.figure()
-    shap.summary_plot(shap_values, X_test_prep, feature_names=feature_names, show=False)
+    shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_04_rf_feature_importance_shap_summary.png",
+        f"results/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
         dpi=300,
     )
     plt.close()
@@ -105,7 +105,7 @@ def plot_shap_summary_and_bar(shap_values, X_test_prep, feature_names, pseudonym
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
+        f"results/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
         dpi=300,
     )
     plt.close()

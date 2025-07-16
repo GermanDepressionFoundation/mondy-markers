@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
+from scipy import stats
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
@@ -20,7 +21,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 def ensure_results_dir():
-    os.makedirs("results/", exist_ok=True)
+    os.makedirs("results/models", exist_ok=True)
 
 
 def prepare_data(df, target_column):
@@ -57,7 +58,7 @@ def evaluate_and_plot_parity(y_true, y_pred, r2, mae, pseudonym, model_name, suf
     plt.title(f"Parity Plot\nR² = {r2:.2f}, MAE = {mae:.2f} | n_test = {len(y_true)}")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"results/{pseudonym}_{suffix}_{model_name}_parity.png", dpi=300)
+    plt.savefig(f"results/models/{pseudonym}_{suffix}_{model_name}_parity.png", dpi=300)
     plt.close()
 
 
@@ -75,18 +76,18 @@ def plot_elasticnet_coefficients(feature_names, coefficients, pseudonym):
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_02_elasticnet_feature_importance.png",
+        f"results/models/{pseudonym}_02_elasticnet_feature_importance.png",
         dpi=300,
     )
     plt.close()
 
 
-def plot_shap_summary_and_bar(shap_values, X_test_prep, feature_names, pseudonym):
+def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     plt.figure()
-    shap.summary_plot(shap_values, X_test_prep, feature_names=feature_names, show=False)
+    shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_04_rf_feature_importance_shap_summary.png",
+        f"results/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
         dpi=300,
     )
     plt.close()
@@ -105,7 +106,7 @@ def plot_shap_summary_and_bar(shap_values, X_test_prep, feature_names, pseudonym
     plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.savefig(
-        f"results/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
+        f"results/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
         dpi=300,
     )
     plt.close()
@@ -121,9 +122,7 @@ def compute_rmssd(series):
     return np.sqrt(np.nanmean(diffs**2))
 
 
-def plot_feature_importance_stats(
-    elasticnet_feature_importances, rf_feature_importances
-):
+def plot_feature_importance_stats(elasticnet_feature_importances, rf_feature_importances):
 
     all_features = sorted(elasticnet_feature_importances.keys())
 
@@ -181,6 +180,117 @@ def plot_feature_importance_stats(
         dpi=300,
     )
 
+def plot_mae_rmssd_bar(results_dict, save_path="results/mae_rmssd_bar.png"):
+    """
+    Stellt MAE (linke Y-Achse) und RMSSD_PHQ2 (rechte Y-Achse) pro Proband
+    als gruppierte Balken dar. Beide Y-Achsen sind gleich skaliert.
+
+    Parameters
+    ----------
+    results_dict : dict
+        {pseudonym: {"mae_elastic": float, "rmssd_phq2": float}, …}
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    pseudonyms   = list(results_dict.keys())
+    mae_vals     = [results_dict[p]["mae_elastic"] for p in pseudonyms]
+    rmssd_vals   = [results_dict[p]["rmssd_phq2"]  for p in pseudonyms]
+
+    x = np.arange(len(pseudonyms))
+    width = 0.4
+
+    # Gemeinsames Y-Limit bestimmen (+1 für etwas mehr Platz)
+    all_vals = mae_vals + rmssd_vals
+    y_max = max(all_vals) + 1
+
+    fig, ax1 = plt.subplots(figsize=(max(8, len(pseudonyms) * .55), 6))
+    ax2 = ax1.twinx()
+
+    ax1.bar(x - width/2, mae_vals,   width, label="MAE (Elastic Net)",
+            color="tab:blue")
+    ax2.bar(x + width/2, rmssd_vals, width, label="RMSSD PHQ-2",
+            color="tab:orange")
+
+    ax1.set_ylabel("MAE")
+    ax2.set_ylabel("RMSSD PHQ-2")
+    ax1.set_xticks(x); ax1.set_xticklabels(pseudonyms, rotation=90)
+    ax1.set_title("MAE vs RMSSD (PHQ-2) pro Proband")
+
+    # Achsen gleich skalieren
+    ax1.set_ylim(0, y_max)
+    ax2.set_ylim(0, y_max)
+
+    # gemeinsame Legende, automatisch platzieren
+    h1,l1 = ax1.get_legend_handles_labels()
+    h2,l2 = ax2.get_legend_handles_labels()
+    fig.legend(h1+h2, l1+l2, loc="best")
+
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+def plot_phq2_timeseries_from_results(plot_data,
+                                      model_key="rf",
+                                      save_dir="results/timeseries"):
+    """
+    Erstellt für jeden Probanden einen Zeitreihen-Plot:
+    PHQ-2-Rohwerte + Prediction ± 95 %-Intervall.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    def _equalize(*arrays):
+        min_len = min(map(len, arrays))
+        return [arr[:min_len] for arr in arrays]
+
+    for pseudo, data in plot_data.items():
+        if model_key not in data:
+            continue                    
+
+        # ---- Arrays vereinheitlichen --------------------------------------
+        ts, phq2, pred, low, up = _equalize(
+            data["timestamps"],
+            data["phq2_raw"],
+            data[model_key]["pred"],
+            data[model_key]["lower"],
+            data[model_key]["upper"],
+        )
+
+        df = pd.DataFrame({
+            "ts":    pd.to_datetime(ts),
+            "PHQ2":  phq2,
+            "pred":  pred,
+            "lower": low,
+            "upper": up,
+        }).sort_values("ts")
+
+        # ---- Plot ---------------------------------------------------------
+        plt.figure(figsize=(10, 5))
+
+        plt.plot(df["ts"], df["PHQ2"], label="PHQ-2 (roh)", alpha=.7)
+
+        pred_line, = plt.plot(
+            df["ts"], df["pred"],
+            label=f"{model_key.upper()}-Pred"
+        )
+        pred_color = pred_line.get_color()      
+
+        plt.fill_between(
+            df["ts"], df["lower"], df["upper"],
+            color=pred_color, alpha=.25,           
+            label="95 %-CI"
+        )
+
+        plt.title(f"{pseudo} – PHQ-2 vs. {model_key.upper()}")
+        plt.xlabel("Datum")
+        plt.ylabel("PHQ-2-Score")
+        plt.legend()
+        plt.tight_layout()
+
+        out_path = f"{save_dir}/{pseudo}_{model_key}.png"
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+        print(f"[Info] Plot gespeichert: {out_path}")
 
 # %% Main Processing Function
 
@@ -189,6 +299,7 @@ def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
     rmssd_values_phq9 = []
+    plot_data = {}   
 
     elasticnet_feature_importances = {
         feature: []
@@ -209,6 +320,11 @@ def process_participants(df_raw, pseudonyms, target_column):
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365]
 
+        target_mask      = df_participant[target_column].notna()
+        df_model         = df_participant.loc[target_mask].reset_index(drop=True)
+        timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
+        y_full           = df_model[target_column].to_numpy()
+
         df_weekly = df_participant[["timestamp_utc", "woche_PHQ9_sum"]].copy()
         df_weekly.set_index("timestamp_utc", inplace=True)
         df_weekly = df_weekly.resample("7D").sum(min_count=1)
@@ -220,7 +336,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         rmssd_values_phq9.append(rmssd_phq9)
 
         # --- Prepare data ---
-        X, y, feature_names = prepare_data(df_participant, target_column)
+        X, y, feature_names = prepare_data(df_model, target_column)
 
         # --- Preprocessing ---
         preproc = preprocess_pipeline()
@@ -266,6 +382,15 @@ def process_participants(df_raw, pseudonyms, target_column):
         except Exception as e:
             print(f"Elastic Net failed for {pseudonym}: {e}")
             continue
+        
+        # ---  Vorhersagen auf der *vollständigen* Zeitreihe -----------------
+        y_pred_elastic_full = elastic.predict(X_preproc)
+        # Unsicherheit EN: konstantes CI über Trainingsresiduals
+        resid_std   = np.std(y_train - elastic.predict(X_train), ddof=1)
+        z_score     = stats.norm.ppf(0.975)               # 95 %-CI
+        en_margin   = z_score * resid_std
+        en_lower    = y_pred_elastic_full - en_margin
+        en_upper    = y_pred_elastic_full + en_margin
 
         # --- Random Forest ---
         rf = RandomForestRegressor(random_state=RANDOM_STATE)
@@ -282,6 +407,12 @@ def process_participants(df_raw, pseudonyms, target_column):
         y_pred_rf = best_rf.predict(X_test)
         r2_rf = round(r2_score(y_test, y_pred_rf), 3)
         mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 3)
+
+        # RF-Unsicherheit: Verteilung aller Bäume
+        tree_preds  = np.vstack([t.predict(X_preproc) for t in best_rf.estimators_])
+        rf_lower    = np.percentile(tree_preds,  2.5, axis=0)
+        rf_upper    = np.percentile(tree_preds, 97.5, axis=0)
+        y_pred_rf_full = tree_preds.mean(axis=0)
 
         evaluate_and_plot_parity(
             y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03"
@@ -308,6 +439,20 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rmssd_phq9": rmssd_phq9,
             # placeholder, will fill low_variance after we compute percentiles
             "low_variance_candidate": None,
+        }
+        plot_data[pseudonym] = {
+            "timestamps": timestamps_model,
+            "phq2_raw":   y_full.tolist(),
+            "elastic": {
+                "pred":  y_pred_elastic_full.tolist(),
+                "lower": en_lower.tolist(),
+                "upper": en_upper.tolist(),
+            },
+            "rf": {
+                "pred":  y_pred_rf_full.tolist(),
+                "lower": rf_lower.tolist(),
+                "upper": rf_upper.tolist(),
+            },
         }
 
     # Compute 25th percentile thresholds across all participants
@@ -350,6 +495,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         rf_feature_counts,
         elasticnet_stats,
         rf_stats,
+        plot_data,
     )
 
 
@@ -383,11 +529,18 @@ pseudonyms = df_raw["pseudonym"].unique()
 TOP_K = 15  # max number of top features to count per participant
 RANDOM_STATE = 42
 
-results, elastic_counts, rf_counts, elastic_stats, rf_stats = process_participants(
+results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data = process_participants(
     df_raw, pseudonyms, target_column
 )
 
-# Save evaluation metrics
+# %% Plot MAE and RMSSD for each participant
+plot_mae_rmssd_bar(results)
+
+# %% Plot PHQ-2 time series with predictions
+plot_phq2_timeseries_from_results(plot_data, "rf")
+plot_phq2_timeseries_from_results(plot_data, "elastic")
+
+# %% Save evaluation metrics
 results_df = pd.DataFrame.from_dict(results, orient="index")
 results_df.to_csv("results/model_performance_summary.csv")
 

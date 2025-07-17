@@ -34,7 +34,7 @@ merged["change_type"] = np.where(
     np.where(merged["shift"] < 0, "↓ More important in EN", "No change"),
 )
 
-# --- Highlight top 20 shifted features for annotations ---
+# --- Highlight top x shifted features for annotations ---
 TOP_HIGHLIGHT = 20
 top_shift_features = merged.sort_values("abs_shift", ascending=False).head(
     TOP_HIGHLIGHT
@@ -46,6 +46,7 @@ fig = px.scatter(
     x="ElasticNet",
     y="RF",
     color="change_type",
+    template="plotly_white",
     size="abs_shift",
     hover_name="feature",
     hover_data={
@@ -62,8 +63,8 @@ fig = px.scatter(
     },
     title="Normalized Feature Importance Shift: Elastic Net vs Random Forest",
     labels={
-        "ElasticNet": "Elastic Net (normalized importance)",
-        "RF": "Random Forest (normalized importance)",
+        "ElasticNet": "Elastic Net (Mean Feature Importance, Normalized 0–1)",
+        "RF": "Random Forest (Mean Feature Importance, Normalized 0–1)",
     },
 )
 
@@ -75,8 +76,8 @@ fig.add_shape(
 fig.update_traces(marker=dict(opacity=0.7, line=dict(width=0.5, color="DarkSlateGrey")))
 
 fig.update_layout(
-    width=950,
-    height=750,
+    width=1200,
+    height=1200,
     legend_title="Shift Type",
 )
 
@@ -91,7 +92,7 @@ for feat, row in top_shift_features.iterrows():
         font=dict(size=10, color="black"),
         xanchor="center",
         yanchor="top",
-        yshift=-15,
+        yshift=-12,
     )
 
 # --- Paths ---
@@ -99,7 +100,7 @@ png_path = "results/feature_importance_shift_scatter.png"
 html_path = "results/feature_importance_shift_scatter.html"
 
 # Save PNG
-fig.write_image(png_path, scale=2)
+fig.write_image(png_path, scale=1)
 
 # Create descriptive text
 description_text = f"""
@@ -257,8 +258,8 @@ plt.bar(
 )
 
 plt.xticks(x, top_feature_means.index, rotation=90)
-plt.ylabel("Relative Mean Feature Importance (0–1)")
-plt.title(f"Relative Mean Importance (Sorted by Elastic Net)")
+plt.ylabel("Mean Feature Importance (Normalized 0–1)")
+plt.title(f"Mean Feature Importance (Normalized, Sorted by Elastic Net)")
 plt.legend()
 plt.tight_layout()
 

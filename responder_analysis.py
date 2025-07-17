@@ -97,53 +97,6 @@ results_df["model_winner"] = results_df.apply(model_winner, axis=1)
 model_winner_summary = results_df["model_winner"].value_counts()
 model_winner_summary.to_csv("results/model_winner_summary.csv")
 
-# --- Aggregated Feature Importance (Bar Plots) ---
-
-# Load feature importance counts
-elasticnet_features = pd.read_csv(
-    "results/elasticnet_top_features.csv", header=None, index_col=0
-).squeeze("columns")
-rf_features = pd.read_csv(
-    "results/randomforest_top_features.csv", header=None, index_col=0
-).squeeze("columns")
-
-# Combine feature counts into a DataFrame and fill missing values
-bar_width = 0.4
-feature_df = pd.DataFrame(
-    {"ElasticNet": elasticnet_features, "RandomForest": rf_features}
-).fillna(0)
-
-# Ensure consistent order
-feature_df = feature_df.sort_values(["ElasticNet", "RandomForest"], ascending=False)
-x = range(len(feature_df))
-
-plt.figure(figsize=(12, 6))
-plt.bar(
-    [i - bar_width / 2 for i in x],
-    feature_df["ElasticNet"],
-    width=bar_width,
-    label="Elastic Net",
-    color="steelblue",
-)
-plt.bar(
-    [i + bar_width / 2 for i in x],
-    feature_df["RandomForest"],
-    width=bar_width,
-    label="Random Forest",
-    color="salmon",
-)
-
-plt.xticks(x, feature_df.index, rotation=90)
-plt.ylabel("Number of Appearances in Top-K")
-plt.title("Top 20 Features: Elastic Net vs Random Forest")
-plt.legend()
-plt.tight_layout()
-plt.savefig(
-    "results/aggregated_feature_importance_comparison_grouped.png",
-    dpi=300,
-)
-plt.close()
-
 # Extract RMSSD values
 rmssd_phq2_values = results_df["rmssd_phq2"].values
 rmssd_phq9_values = results_df["rmssd_phq9"].values

@@ -1,6 +1,11 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.express as px
+
+from colormap import PLOT_STYLES
+
+plt.rcParams.update({"font.family": PLOT_STYLES["font"]})
 
 # --- Load feature importance stats ---
 elastic_csv = "results/elasticnet_feature_importance_stats.csv"
@@ -51,8 +56,8 @@ fig = px.scatter(
         "change_type": True,
     },
     color_discrete_map={
-        "↑ More important in RF": "red",
-        "↓ More important in EN": "blue",
+        "↑ More important in RF": PLOT_STYLES["colors"]["RF"],
+        "↓ More important in EN": PLOT_STYLES["colors"]["Elasticnet"],
         "No change": "gray",
     },
     title="Normalized Feature Importance Shift: Elastic Net vs Random Forest",
@@ -106,7 +111,7 @@ Each point represents a single feature used in the models. The x-axis shows its 
 
 - Points along the <b>diagonal dashed line</b> have similar importance in both models.<br>
 - <span style="color:red;"><b>Red points</b></span> gained importance in the non-linear model (RF).<br>
-- <span style="color:blue;"><b>Blue points</b></span> were more important in the linear model (EN).<br>
+- <span style="color:orange;"><b>Orange points</b></span> were more important in the linear model (EN).<br>
 - Point size reflects how strongly the importance shifted between models.<br><br>
 
 Hover over any point to see the feature name and exact values.<br>
@@ -159,5 +164,147 @@ with open(html_path, "w", encoding="utf-8") as f:
 print(f"Saved PNG: {png_path}")
 print(f"Saved interactive HTML with description: {html_path}")
 
-# Show interactive plot in current session
-fig.show()
+# --- Aggregated Feature Importance (Bar Plots) ---
+
+# Load feature importance counts
+elasticnet_features = pd.read_csv(
+    "results/elasticnet_top_features.csv", header=None, index_col=0
+).squeeze("columns")
+rf_features = pd.read_csv(
+    "results/randomforest_top_features.csv", header=None, index_col=0
+).squeeze("columns")
+
+# Combine feature counts into a DataFrame and fill missing values
+bar_width = 0.4
+feature_df = pd.DataFrame(
+    {"ElasticNet": elasticnet_features, "RandomForest": rf_features}
+).fillna(0)
+
+# Ensure consistent order
+feature_df = feature_df.sort_values(["ElasticNet", "RandomForest"], ascending=False)
+x = range(len(feature_df))
+
+plt.figure(figsize=(12, 6))
+plt.bar(
+    [i - bar_width / 2 for i in x],
+    feature_df["ElasticNet"],
+    width=bar_width,
+    label="Elastic Net",
+    color=PLOT_STYLES["colors"]["Elasticnet"],
+)
+plt.bar(
+    [i + bar_width / 2 for i in x],
+    feature_df["RandomForest"],
+    width=bar_width,
+    label="Random Forest",
+    color=PLOT_STYLES["colors"]["RF"],
+)
+
+plt.xticks(x, feature_df.index, rotation=90)
+plt.ylabel("Number of Appearances in Top-K")
+plt.title("Top 20 Features: Elastic Net vs Random Forest")
+plt.legend()
+plt.tight_layout()
+plt.savefig(
+    "results/aggregated_feature_importance_comparison_grouped.png",
+    dpi=300,
+)
+plt.close()
+
+
+# --- Merge mean values ---
+feature_means = pd.DataFrame(
+    {"ElasticNet_raw": elastic_df["mean"], "RandomForest_raw": rf_df["mean"]}
+).fillna(0)
+
+# Normalize by each model's max
+feature_means["ElasticNet"] = (
+    feature_means["ElasticNet_raw"] / feature_means["ElasticNet_raw"].max()
+)
+feature_means["RandomForest"] = (
+    feature_means["RandomForest_raw"] / feature_means["RandomForest_raw"].max()
+)
+
+# Sort by Elastic Net relative importance
+feature_means_sorted = feature_means.sort_values("ElasticNet", ascending=False)
+
+# Pick top N for readability
+TOP_N = len(feature_means) - 2  # TODO remove phq-9 und timestamp column beforehand
+top_feature_means = feature_means_sorted.head(TOP_N)
+
+# X positions
+x = range(len(top_feature_means))
+bar_width = 0.4
+
+plt.figure(figsize=(14, 6))
+
+# Elastic Net bars (left)
+plt.bar(
+    [i - bar_width / 2 for i in x],
+    top_feature_means["ElasticNet"],
+    width=bar_width,
+    label="Elastic Net (relative)",
+    color=PLOT_STYLES["colors"]["Elasticnet"],
+)
+
+# Random Forest bars (right)
+plt.bar(
+    [i + bar_width / 2 for i in x],
+    top_feature_means["RandomForest"],
+    width=bar_width,
+    label="Random Forest (relative)",
+    color=PLOT_STYLES["colors"]["RF"],
+)
+
+plt.xticks(x, top_feature_means.index, rotation=90)
+plt.ylabel("Relative Mean Feature Importance (0–1)")
+plt.title(f"Relative Mean Importance (Sorted by Elastic Net)")
+plt.legend()
+plt.tight_layout()
+
+plt.savefig(
+    "results/aggregated_feature_importance_relative_sorted_elastic.png", dpi=300
+)
+plt.close()
+
+# --- Normalize each model's importance by its max ---
+elastic_df["relative"] = elastic_df["mean"] / elastic_df["mean"].max()
+rf_df["relative"] = rf_df["mean"] / rf_df["mean"].max()
+
+# --- Sort by each model's relative importance ---
+elastic_sorted = elastic_df.sort_values("relative", ascending=False)
+rf_sorted = rf_df.sort_values("relative", ascending=False)
+
+# --- Select top N for readability ---
+elastic_top = elastic_sorted.head(TOP_N)
+rf_top = rf_sorted.head(TOP_N)
+
+# --- Plot Elastic Net ---
+plt.figure(figsize=(12, 6))
+plt.bar(
+    elastic_top.index,
+    elastic_top["relative"],
+    color=PLOT_STYLES["colors"]["Elasticnet"],
+    label="Elastic Net (relative importance)",
+)
+plt.xticks(rotation=90)
+plt.ylabel("Relative Mean Feature Importance (0–1)")
+plt.title(f"Features (Elastic Net, normalized by max)")
+plt.tight_layout()
+plt.savefig("results/elasticnet_relative_feature_importance.png", dpi=300)
+plt.close()
+
+# --- Plot Random Forest ---
+plt.figure(figsize=(12, 6))
+plt.bar(
+    rf_top.index,
+    rf_top["relative"],
+    color=PLOT_STYLES["colors"]["RF"],
+    label="Random Forest (relative importance)",
+)
+plt.xticks(rotation=90)
+plt.ylabel("Relative Mean Feature Importance (0–1)")
+plt.title(f"Features (Random Forest, normalized by max)")
+plt.tight_layout()
+plt.savefig("results/randomforest_relative_feature_importance.png", dpi=300)
+plt.close()

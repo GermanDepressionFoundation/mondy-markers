@@ -4,6 +4,8 @@ import os
 from collections import Counter
 
 import matplotlib.pyplot as plt
+from .colormap import PLOT_STYLES
+
 import numpy as np
 import pandas as pd
 import shap
@@ -293,7 +295,6 @@ def plot_phq2_timeseries_from_results(plot_data,
         print(f"[Info] Plot gespeichert: {out_path}")
 
 # %% Main Processing Function
-
 
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}

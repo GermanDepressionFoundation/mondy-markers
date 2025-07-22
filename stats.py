@@ -35,8 +35,8 @@ for col in df_raw.columns:
             "Feature": col,
             "NumRecords_mean": num_records_mean,
             "NumRecords_std": num_records_std,
-            "Values_mean_mean": values_mean_mean,
-            "Values_mean_std": values_mean_std,
+            "Values_mean": values_mean_mean,
+            "Values_std": values_mean_std,
             "MissingRate (%)": missing_rate,
         }
     )

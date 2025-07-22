@@ -5,7 +5,7 @@ from collections import Counter
 
 import matplotlib.pyplot as plt
 
-from colormap import PLOT_STYLES
+from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
@@ -13,7 +13,6 @@ import forestci as fci
 import numpy as np
 import pandas as pd
 import shap
-from scipy import stats
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
@@ -22,7 +21,6 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.utils import resample
 
 # %% Utility and Pipeline Functions
 
@@ -57,15 +55,20 @@ def preprocess_pipeline():
 
 
 def evaluate_and_plot_parity(y_true, y_pred, r2, mae, pseudonym, model_name, suffix=""):
-    plt.figure(figsize=(6, 6))
+    plt.figure(figsize=(8, 6))
     plt.scatter(y_true, y_pred, alpha=0.7)
     plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "r--")
     plt.xlabel("True PHQ-2")
     plt.ylabel("Predicted PHQ-2")
     plt.title(f"Parity Plot\nR² = {r2:.2f}, MAE = {mae:.2f} | n_test = {len(y_true)}")
     plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(f"results/models/{pseudonym}_{suffix}_{model_name}_parity.png", dpi=300)
+    # fig = plt.gcf()
+    # add_logo_to_figure(fig)
+    plt.savefig(
+        f"results/models/{pseudonym}_{suffix}_{model_name}_parity.png",
+        dpi=300,
+        bbox_inches=None,
+    )
     plt.close()
 
 
@@ -82,9 +85,10 @@ def plot_elasticnet_coefficients(feature_names, coefficients, pseudonym):
     plt.title("Feature Importance (Elastic Net Coefficients)")
     plt.gca().invert_yaxis()
     plt.tight_layout()
+    fig = plt.gcf()
+    add_logo_to_figure(fig)
     plt.savefig(
-        f"results/models/{pseudonym}_02_elasticnet_feature_importance.png",
-        dpi=300,
+        f"results/models/{pseudonym}_02_elasticnet_feature_importance.png", dpi=300
     )
     plt.close()
 
@@ -93,6 +97,8 @@ def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     plt.figure()
     shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
     plt.tight_layout()
+    fig = plt.gcf()
+    add_logo_to_figure(fig)
     plt.savefig(
         f"results/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
         dpi=300,
@@ -112,6 +118,8 @@ def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     plt.title("SHAP Feature Contributions (Centered at 0)")
     plt.gca().invert_yaxis()
     plt.tight_layout()
+    fig = plt.gcf()
+    add_logo_to_figure(fig)
     plt.savefig(
         f"results/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
         dpi=300,
@@ -184,6 +192,8 @@ def plot_feature_importance_stats(
     )
     plt.tight_layout()
     plt.subplots_adjust(top=0.92)
+    fig = plt.gcf()
+    add_logo_to_figure(fig)
     plt.savefig(
         "results/feature_importance_boxplots_stacked_aligned.png",
         dpi=300,
@@ -233,10 +243,11 @@ def plot_mae_rmssd_bar(
     ax1.set_xticklabels(pseudonyms, rotation=90)
     ax1.set_title(f"MAE ({model_key.upper()}) vs. RMSSD pro Proband")
 
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="upper right")
+    # h1, l1 = ax1.get_legend_handles_labels()
+    # h2, l2 = ax2.get_legend_handles_labels()
+    # ax1.legend(h1 + h2, l1 + l2, loc="upper right")
     fig.tight_layout()
+    add_logo_to_figure(fig)
     plt.savefig(save_path, dpi=300)
     plt.close()
 
@@ -291,13 +302,14 @@ def plot_mae_rmssd_bar_2(
     fig.legend(
         [bar1, bar2],
         [bar1.get_label(), bar2.get_label()],
-        loc="lower left",
-        bbox_to_anchor=(0.0, -0.12),  # x-Offset 0, y-Offset −0.12
+        # loc="lower left",
+        # bbox_to_anchor=(0.0, -0.12),  # x-Offset 0, y-Offset −0.12
         ncol=2,
         frameon=False,
     )
 
     fig.tight_layout()
+    add_logo_to_figure(fig)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -381,6 +393,8 @@ def plot_phq2_timeseries_from_results(
         plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
+        fig = plt.gcf()
+        add_logo_to_figure(fig)
         plt.savefig(out_path, dpi=300)
         plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
@@ -474,6 +488,8 @@ def plot_phq2_timeseries_from_results_2(
         plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
+        fig = plt.gcf()
+        add_logo_to_figure(fig)
         plt.savefig(out_path, dpi=300)
         plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
@@ -592,6 +608,8 @@ def plot_phq2_timeseries_from_results_3(
         plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
+        fig = plt.gcf()
+        add_logo_to_figure(fig)
         plt.savefig(out_path, dpi=300)
         plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
@@ -603,7 +621,6 @@ def plot_phq2_timeseries_from_results_3(
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
-    rmssd_values_phq9 = []
     plot_data = {}
 
     elasticnet_feature_importances = {
@@ -630,15 +647,8 @@ def process_participants(df_raw, pseudonyms, target_column):
         timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
         y_full = df_model[target_column].to_numpy()
 
-        df_weekly = df_participant[["timestamp_utc", "woche_PHQ9_sum"]].copy()
-        df_weekly.set_index("timestamp_utc", inplace=True)
-        df_weekly = df_weekly.resample("7D").sum(min_count=1)
-
-        # Compute RMSSD for PHQ-2 & PHQ-9
+        # Compute RMSSD for PHQ-2
         rmssd_phq2 = compute_rmssd(df_participant["abend_PHQ2_sum"].values)
-        rmssd_phq9 = compute_rmssd(df_weekly["woche_PHQ9_sum"].values)
-        rmssd_values_phq2.append(rmssd_phq2)
-        rmssd_values_phq9.append(rmssd_phq9)
 
         # --- Prepare data ---
         X, y, feature_names = prepare_data(df_model, target_column)
@@ -764,9 +774,10 @@ def process_participants(df_raw, pseudonyms, target_column):
             "r2_rf": r2_rf,
             "mae_rf": mae_rf,
             "rmssd_phq2": rmssd_phq2,
-            "rmssd_phq9": rmssd_phq9,
             # placeholder, will fill low_variance after we compute percentiles
             "low_variance_candidate": None,
+            "elastic_mae_lower_rmssd_phq2": None,
+            "rf_mae_lower_rmssd_phq2": None,
         }
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
@@ -787,17 +798,24 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     # Compute 25th percentile thresholds across all participants
     phq2_thresh = np.nanpercentile(rmssd_values_phq2, 25)
-    phq9_thresh = np.nanpercentile(rmssd_values_phq9, 25)
-    print(
-        f"25th percentile thresholds: PHQ-2={phq2_thresh:.3f}, PHQ-9={phq9_thresh:.3f}"
-    )
+    print(f"25th percentile thresholds: PHQ-2={phq2_thresh:.3f}")
 
     # Flag participants as low-variance candidates
     for pseudonym in results:
-        is_low_var = (results[pseudonym]["rmssd_phq2"] < phq2_thresh) or (
-            results[pseudonym]["rmssd_phq9"] < phq9_thresh
-        )
+        is_low_var = results[pseudonym]["rmssd_phq2"] < phq2_thresh
         results[pseudonym]["low_variance_candidate"] = is_low_var
+
+        is_elastic_mae_lower_rmssd_phq2 = (
+            results[pseudonym]["mae_elastic"] < results[pseudonym]["rmssd_phq2"]
+        )
+        results[pseudonym][
+            "elastic_mae_lower_rmssd_phq2"
+        ] = is_elastic_mae_lower_rmssd_phq2
+
+        is_rf_mae_lower_rmssd_phq2 = (
+            results[pseudonym]["mae_rf"] < results[pseudonym]["rmssd_phq2"]
+        )
+        results[pseudonym]["rf_mae_lower_rmssd_phq2"] = is_rf_mae_lower_rmssd_phq2
 
     # Compute global feature stats
     elasticnet_stats = {

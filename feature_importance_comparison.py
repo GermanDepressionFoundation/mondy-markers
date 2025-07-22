@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 
-from colormap import PLOT_STYLES
+from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams.update({"font.family": PLOT_STYLES["font"]})
 
@@ -95,6 +95,22 @@ for feat, row in top_shift_features.iterrows():
         yshift=-12,
     )
 
+# Add logo to Plotly figure
+fig.add_layout_image(
+    dict(
+        source="../SDD_Logo_rgb_pos_600_reduced2.png",
+        xref="paper",
+        yref="paper",
+        x=0.1,
+        y=0.9,
+        sizex=0.2,
+        sizey=0.2,
+        xanchor="left",
+        yanchor="top",
+        layer="above",
+    )
+)
+
 # --- Paths ---
 png_path = "results/feature_importance_shift_scatter.png"
 html_path = "results/feature_importance_shift_scatter.html"
@@ -185,33 +201,36 @@ feature_df = pd.DataFrame(
 feature_df = feature_df.sort_values(["ElasticNet", "RandomForest"], ascending=False)
 x = range(len(feature_df))
 
-plt.figure(figsize=(12, 6))
-plt.bar(
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.bar(
     [i - bar_width / 2 for i in x],
     feature_df["ElasticNet"],
     width=bar_width,
     label="Elastic Net",
     color=PLOT_STYLES["colors"]["Elasticnet"],
 )
-plt.bar(
+ax.bar(
     [i + bar_width / 2 for i in x],
     feature_df["RandomForest"],
     width=bar_width,
     label="Random Forest",
     color=PLOT_STYLES["colors"]["RF"],
 )
-
-plt.xticks(x, feature_df.index, rotation=90)
-plt.ylabel("Number of Appearances in Top-K")
+ax.set_xticks(list(x))
+ax.set_xticklabels(feature_df.index, rotation=90)
+ax.set_ylabel("Number of Appearances in Top-K")
 plt.title("Top 20 Features: Elastic Net vs Random Forest")
 plt.legend()
+
+# Add logo
+add_logo_to_figure(fig, position="top_right")
+
 plt.tight_layout()
 plt.savefig(
     "results/aggregated_feature_importance_comparison_grouped.png",
     dpi=300,
 )
 plt.close()
-
 
 # --- Merge mean values ---
 feature_means = pd.DataFrame(
@@ -233,14 +252,13 @@ feature_means_sorted = feature_means.sort_values("ElasticNet", ascending=False)
 TOP_N = len(feature_means) - 2  # TODO remove phq-9 und timestamp column beforehand
 top_feature_means = feature_means_sorted.head(TOP_N)
 
-# X positions
 x = range(len(top_feature_means))
 bar_width = 0.4
 
-plt.figure(figsize=(14, 6))
+fig, ax = plt.subplots(figsize=(14, 6))
 
 # Elastic Net bars (left)
-plt.bar(
+ax.bar(
     [i - bar_width / 2 for i in x],
     top_feature_means["ElasticNet"],
     width=bar_width,
@@ -249,7 +267,7 @@ plt.bar(
 )
 
 # Random Forest bars (right)
-plt.bar(
+ax.bar(
     [i + bar_width / 2 for i in x],
     top_feature_means["RandomForest"],
     width=bar_width,
@@ -257,12 +275,16 @@ plt.bar(
     color=PLOT_STYLES["colors"]["RF"],
 )
 
-plt.xticks(x, top_feature_means.index, rotation=90)
-plt.ylabel("Mean Feature Importance (Normalized 0–1)")
+ax.set_xticks(list(x))
+ax.set_xticklabels(top_feature_means.index, rotation=90)
+ax.set_ylabel("Mean Feature Importance (Normalized 0–1)")
 plt.title(f"Mean Feature Importance (Normalized, Sorted by Elastic Net)")
 plt.legend()
-plt.tight_layout()
 
+# Add logo
+add_logo_to_figure(fig, position="top_right")
+
+plt.tight_layout()
 plt.savefig(
     "results/aggregated_feature_importance_relative_sorted_elastic.png", dpi=300
 )
@@ -281,8 +303,8 @@ elastic_top = elastic_sorted.head(TOP_N)
 rf_top = rf_sorted.head(TOP_N)
 
 # --- Plot Elastic Net ---
-plt.figure(figsize=(12, 6))
-plt.bar(
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.bar(
     elastic_top.index,
     elastic_top["relative"],
     color=PLOT_STYLES["colors"]["Elasticnet"],
@@ -291,13 +313,17 @@ plt.bar(
 plt.xticks(rotation=90)
 plt.ylabel("Relative Mean Feature Importance (0–1)")
 plt.title(f"Features (Elastic Net, normalized by max)")
+
+# Add logo
+add_logo_to_figure(fig, position="top_right")
+
 plt.tight_layout()
 plt.savefig("results/elasticnet_relative_feature_importance.png", dpi=300)
 plt.close()
 
 # --- Plot Random Forest ---
-plt.figure(figsize=(12, 6))
-plt.bar(
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.bar(
     rf_top.index,
     rf_top["relative"],
     color=PLOT_STYLES["colors"]["RF"],
@@ -306,6 +332,10 @@ plt.bar(
 plt.xticks(rotation=90)
 plt.ylabel("Relative Mean Feature Importance (0–1)")
 plt.title(f"Features (Random Forest, normalized by max)")
+
+# Add logo
+add_logo_to_figure(fig, position="top_right")
+
 plt.tight_layout()
 plt.savefig("results/randomforest_relative_feature_importance.png", dpi=300)
 plt.close()

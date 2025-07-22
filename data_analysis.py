@@ -4,9 +4,12 @@ import os
 from collections import Counter
 
 import matplotlib.pyplot as plt
+
 from colormap import PLOT_STYLES
+
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
+import forestci as fci
 import numpy as np
 import pandas as pd
 import shap
@@ -19,15 +22,14 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.utils import resample  
-import forestci as fci                 
-   
+from sklearn.utils import resample
 
 # %% Utility and Pipeline Functions
 
 
 def ensure_results_dir():
     os.makedirs("results/models", exist_ok=True)
+
 
 def prepare_data(df, target_column):
     df = df.drop(columns=["timestamp_utc", "pseudonym", "woche_PHQ9_sum"])
@@ -127,7 +129,9 @@ def compute_rmssd(series):
     return np.sqrt(np.nanmean(diffs**2))
 
 
-def plot_feature_importance_stats(elasticnet_feature_importances, rf_feature_importances):
+def plot_feature_importance_stats(
+    elasticnet_feature_importances, rf_feature_importances
+):
 
     all_features = sorted(elasticnet_feature_importances.keys())
 
@@ -185,8 +189,10 @@ def plot_feature_importance_stats(elasticnet_feature_importances, rf_feature_imp
         dpi=300,
     )
 
-def plot_mae_rmssd_bar(results_dict, model_key="elastic",
-                       save_path=f"results/mae_rmssd_bar.png"):
+
+def plot_mae_rmssd_bar(
+    results_dict, model_key="elastic", save_path=f"results/mae_rmssd_bar.png"
+):
     """
     Bar-Plot von MAE (Elasticnet oder RF) + RMSSD_PHQ2 pro Proband.
 
@@ -194,38 +200,50 @@ def plot_mae_rmssd_bar(results_dict, model_key="elastic",
     ----------
     model_key : {"elastic", "rf"}
     """
-    import matplotlib.pyplot as plt, numpy as np
+    import matplotlib.pyplot as plt
+    import numpy as np
+
     pseudonyms = list(results_dict.keys())
-    mae_vals   = [
+    mae_vals = [
         results_dict[p][f"mae_{'elastic' if model_key=='elastic' else 'rf'}"]
         for p in pseudonyms
     ]
     rmssd_vals = [results_dict[p]["rmssd_phq2"] for p in pseudonyms]
 
-    x     = np.arange(len(pseudonyms))
-    width = .4
-    fig, ax1 = plt.subplots(figsize=(max(8, .6*len(pseudonyms)), 5))
+    x = np.arange(len(pseudonyms))
+    width = 0.4
+    fig, ax1 = plt.subplots(figsize=(max(8, 0.6 * len(pseudonyms)), 5))
     ax2 = ax1.twinx()
 
-    col_mae   = PLOT_STYLES["colors"]["Elasticnet" if model_key=="elastic" else "RF"]
+    col_mae = PLOT_STYLES["colors"]["Elasticnet" if model_key == "elastic" else "RF"]
     col_rmssd = PLOT_STYLES["colors"]["Rohdaten_train"]
 
-    ax1.bar(x-width/2, mae_vals, width,
-            label=f"MAE ({model_key.upper()})", color=col_mae)
-    ax2.bar(x+width/2, rmssd_vals, width,
-            label="RMSSD PHQ-2", color=col_rmssd)
+    ax1.bar(
+        x - width / 2,
+        mae_vals,
+        width,
+        label=f"MAE ({model_key.upper()})",
+        color=col_mae,
+    )
+    ax2.bar(x + width / 2, rmssd_vals, width, label="RMSSD PHQ-2", color=col_rmssd)
 
-    ax1.set_ylabel("MAE");           ax2.set_ylabel("RMSSD PHQ-2")
-    ax1.set_xticks(x); ax1.set_xticklabels(pseudonyms, rotation=90)
+    ax1.set_ylabel("MAE")
+    ax2.set_ylabel("RMSSD PHQ-2")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(pseudonyms, rotation=90)
     ax1.set_title(f"MAE ({model_key.upper()}) vs. RMSSD pro Proband")
 
-    h1,l1 = ax1.get_legend_handles_labels()
-    h2,l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1+h2, l1+l2, loc="upper right")
-    fig.tight_layout(); plt.savefig(save_path, dpi=300); plt.close()
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc="upper right")
+    fig.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
 
-def plot_mae_rmssd_bar_2(results_dict, model_key="elastic",
-                       save_path="results/mae_rmssd_bar.png"):
+
+def plot_mae_rmssd_bar_2(
+    results_dict, model_key="elastic", save_path="results/mae_rmssd_bar.png"
+):
     """
     Bar-Plot von MAE (Elasticnet oder RF) + RMSSD_PHQ2 pro Proband.
 
@@ -234,7 +252,7 @@ def plot_mae_rmssd_bar_2(results_dict, model_key="elastic",
     model_key : {"elastic", "rf"}
     """
     pseudonyms = list(results_dict.keys())
-    mae_vals   = [
+    mae_vals = [
         results_dict[p][f"mae_{'elastic' if model_key=='elastic' else 'rf'}"]
         for p in pseudonyms
     ]
@@ -243,16 +261,22 @@ def plot_mae_rmssd_bar_2(results_dict, model_key="elastic",
     y_max = max(max(mae_vals), max(rmssd_vals)) * 1.05
 
     x, width = np.arange(len(pseudonyms)), 0.4
-    fig, ax1 = plt.subplots(figsize=(max(8, .6*len(pseudonyms)), 5))
+    fig, ax1 = plt.subplots(figsize=(max(8, 0.6 * len(pseudonyms)), 5))
     ax2 = ax1.twinx()
 
-    col_mae   = PLOT_STYLES["colors"]["Elasticnet" if model_key=="elastic" else "RF"]
+    col_mae = PLOT_STYLES["colors"]["Elasticnet" if model_key == "elastic" else "RF"]
     col_rmssd = PLOT_STYLES["colors"]["Rohdaten_train"]
 
-    bar1 = ax1.bar(x-width/2, mae_vals, width,
-                   label=f"MAE ({model_key.upper()})", color=col_mae)
-    bar2 = ax2.bar(x+width/2, rmssd_vals, width,
-                   label="RMSSD PHQ-2", color=col_rmssd)
+    bar1 = ax1.bar(
+        x - width / 2,
+        mae_vals,
+        width,
+        label=f"MAE ({model_key.upper()})",
+        color=col_mae,
+    )
+    bar2 = ax2.bar(
+        x + width / 2, rmssd_vals, width, label="RMSSD PHQ-2", color=col_rmssd
+    )
 
     ax1.set_ylim(0, y_max)
     ax2.set_ylim(0, y_max)
@@ -264,19 +288,23 @@ def plot_mae_rmssd_bar_2(results_dict, model_key="elastic",
     ax1.set_title(f"MAE ({model_key.upper()}) vs. RMSSD pro Proband")
 
     # -------- Legende unterhalb platzieren ------------------------------
-    fig.legend([bar1, bar2],
-               [bar1.get_label(), bar2.get_label()],
-               loc="lower left",
-               bbox_to_anchor=(0.0, -0.12),    # x-Offset 0, y-Offset −0.12
-               ncol=2, frameon=False)
+    fig.legend(
+        [bar1, bar2],
+        [bar1.get_label(), bar2.get_label()],
+        loc="lower left",
+        bbox_to_anchor=(0.0, -0.12),  # x-Offset 0, y-Offset −0.12
+        ncol=2,
+        frameon=False,
+    )
 
     fig.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
 
-def plot_phq2_timeseries_from_results(plot_data,
-                                      model_key="rf",
-                                      save_dir="results/timeseries"):
+
+def plot_phq2_timeseries_from_results(
+    plot_data, model_key="rf", save_dir="results/timeseries"
+):
     """
     Erstellt für jeden Probanden einen Zeitreihen-Plot:
     PHQ-2-Rohwerte + Prediction ± 95 %-Intervall.
@@ -292,53 +320,75 @@ def plot_phq2_timeseries_from_results(plot_data,
             continue
 
         # --- DataFrame vorbereiten ---------------------------------------
-        n = min(len(d["timestamps"]), len(d["phq2_raw"]),
-                len(d[model_key]["pred"]))
-        df = pd.DataFrame({
-            "ts":     pd.to_datetime(d["timestamps"][:n]),
-            "PHQ2":   d["phq2_raw"][:n],
-            "pred":   d[model_key]["pred"][:n],
-            "lower":  d[model_key]["lower"][:n],
-            "upper":  d[model_key]["upper"][:n],
-            "is_train": np.array(d["train_mask"][:n], dtype=bool)
-        }).sort_values("ts")
+        n = min(len(d["timestamps"]), len(d["phq2_raw"]), len(d[model_key]["pred"]))
+        df = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(d["timestamps"][:n]),
+                "PHQ2": d["phq2_raw"][:n],
+                "pred": d[model_key]["pred"][:n],
+                "lower": d[model_key]["lower"][:n],
+                "upper": d[model_key]["upper"][:n],
+                "is_train": np.array(d["train_mask"][:n], dtype=bool),
+            }
+        ).sort_values("ts")
 
         # --- Plot ---------------------------------------------------------
         plt.figure(figsize=(10, 5))
 
-        # Rohdaten als Scatter 
+        # Rohdaten als Scatter
         m_train = df["is_train"]
-        plt.scatter(df.loc[m_train, "ts"],
-                    df.loc[m_train, "PHQ2"],
-                    label="train",
-                    color=PLOT_STYLES["colors"]["Rohdaten_train"],
-                    s=22, alpha=.9)
-        plt.scatter(df.loc[~m_train, "ts"],
-                    df.loc[~m_train, "PHQ2"],
-                    label="test",
-                    color=PLOT_STYLES["colors"]["Rohdaten_test"],
-                    s=22, alpha=.9)
+        plt.scatter(
+            df.loc[m_train, "ts"],
+            df.loc[m_train, "PHQ2"],
+            label="train",
+            color=PLOT_STYLES["colors"]["Rohdaten_train"],
+            s=22,
+            alpha=0.9,
+        )
+        plt.scatter(
+            df.loc[~m_train, "ts"],
+            df.loc[~m_train, "PHQ2"],
+            label="test",
+            color=PLOT_STYLES["colors"]["Rohdaten_test"],
+            s=22,
+            alpha=0.9,
+        )
 
         # Predicitons als Linie + 95 PI %-Intervall
-        pred_color = PLOT_STYLES["colors"]["Elasticnet" if model_key=="elastic"
-                                           else "RF"]
-        plt.plot(df["ts"], df["pred"], label=f"{model_key.upper()}-Pred",
-                 color=pred_color, lw=1.5)
-        plt.fill_between(df["ts"], df["lower"], df["upper"],
-                         color=pred_color, alpha=.25, label="95 %-PI")
+        pred_color = PLOT_STYLES["colors"][
+            "Elasticnet" if model_key == "elastic" else "RF"
+        ]
+        plt.plot(
+            df["ts"],
+            df["pred"],
+            label=f"{model_key.upper()}-Pred",
+            color=pred_color,
+            lw=1.5,
+        )
+        plt.fill_between(
+            df["ts"],
+            df["lower"],
+            df["upper"],
+            color=pred_color,
+            alpha=0.25,
+            label="95 %-PI",
+        )
 
         plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
-        plt.xlabel("Datum"); plt.ylabel("PHQ-2-Score")
-        plt.legend(); plt.tight_layout()
+        plt.xlabel("Datum")
+        plt.ylabel("PHQ-2-Score")
+        plt.legend()
+        plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
-        plt.savefig(out_path, dpi=300); plt.close()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
 
-        
-def plot_phq2_timeseries_from_results_2(plot_data,
-                                      model_key="rf",
-                                      save_dir="results/timeseries"):
+
+def plot_phq2_timeseries_from_results_2(
+    plot_data, model_key="rf", save_dir="results/timeseries"
+):
     """
     Plot: PHQ-2-Rohdaten (Linie, getrennt nach Train/Test, Lücken bei NaN)
           + Modell-Prädiktion ± 95 %-PI.
@@ -346,71 +396,99 @@ def plot_phq2_timeseries_from_results_2(plot_data,
     os.makedirs(save_dir, exist_ok=True)
 
     for pseudo, d in plot_data.items():
-        if model_key not in d:          # Modell fehlt
+        if model_key not in d:  # Modell fehlt
             continue
 
         # -------- Länge angleichen ---------------------------------------
-        n = min(len(d["timestamps"]),
-                len(d["phq2_raw"]),
-                len(d[model_key]["pred"]),
-                len(d[model_key]["lower"]),
-                len(d[model_key]["upper"]),
-                len(d["train_mask"]))
+        n = min(
+            len(d["timestamps"]),
+            len(d["phq2_raw"]),
+            len(d[model_key]["pred"]),
+            len(d[model_key]["lower"]),
+            len(d[model_key]["upper"]),
+            len(d["train_mask"]),
+        )
 
-        df = pd.DataFrame({
-            "ts":       pd.to_datetime(d["timestamps"][:n]),
-            "PHQ2":     d["phq2_raw"][:n],
-            "pred":     d[model_key]["pred"][:n],
-            "lower":    d[model_key]["lower"][:n],
-            "upper":    d[model_key]["upper"][:n],
-            "is_train": np.array(d["train_mask"][:n], dtype=bool)
-        }).sort_values("ts")
+        df = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(d["timestamps"][:n]),
+                "PHQ2": d["phq2_raw"][:n],
+                "pred": d[model_key]["pred"][:n],
+                "lower": d[model_key]["lower"][:n],
+                "upper": d[model_key]["upper"][:n],
+                "is_train": np.array(d["train_mask"][:n], dtype=bool),
+            }
+        ).sort_values("ts")
 
         # -------- Plot ---------------------------------------------------
         plt.figure(figsize=(10, 5))
 
         # Train-Linie: Test-Werte als NaN -> Linienbruch
         y_train_line = df["PHQ2"].where(df["is_train"], np.nan)
-        plt.plot(df["ts"], y_train_line,
-                 label="Rohdaten (Train)",
-                 color=PLOT_STYLES["colors"]["Rohdaten_train"],
-                 lw=1.3)
+        plt.plot(
+            df["ts"],
+            y_train_line,
+            label="Rohdaten (Train)",
+            color=PLOT_STYLES["colors"]["Rohdaten_train"],
+            lw=1.3,
+        )
 
         # Test-Linie: Train-Werte als NaN
         y_test_line = df["PHQ2"].where(~df["is_train"], np.nan)
-        plt.plot(df["ts"], y_test_line,
-                 label="Rohdaten (Test)",
-                 color=PLOT_STYLES["colors"]["Rohdaten_test"],
-                 lw=1.3)
+        plt.plot(
+            df["ts"],
+            y_test_line,
+            label="Rohdaten (Test)",
+            color=PLOT_STYLES["colors"]["Rohdaten_test"],
+            lw=1.3,
+        )
 
         # Modell-Vorhersage
-        pred_color = (PLOT_STYLES["colors"]["Elasticnet"]
-                      if model_key == "elastic"
-                      else PLOT_STYLES["colors"]["RF"])
-        plt.plot(df["ts"], df["pred"],
-                 label=f"{model_key.upper()}-Pred",
-                 color=pred_color, lw=1.6)
+        pred_color = (
+            PLOT_STYLES["colors"]["Elasticnet"]
+            if model_key == "elastic"
+            else PLOT_STYLES["colors"]["RF"]
+        )
+        plt.plot(
+            df["ts"],
+            df["pred"],
+            label=f"{model_key.upper()}-Pred",
+            color=pred_color,
+            lw=1.6,
+        )
 
         # Fehlerband
-        plt.fill_between(df["ts"], df["lower"], df["upper"],
-                         color=pred_color, alpha=.25, label="95 %-PI")
+        plt.fill_between(
+            df["ts"],
+            df["lower"],
+            df["upper"],
+            color=pred_color,
+            alpha=0.25,
+            label="95 %-PI",
+        )
 
         plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
-        plt.xlabel("Datum"); plt.ylabel("PHQ-2-Score")
-        plt.legend(); plt.tight_layout()
+        plt.xlabel("Datum")
+        plt.ylabel("PHQ-2-Score")
+        plt.legend()
+        plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
-        plt.savefig(out_path, dpi=300); plt.close()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
 
-import os
-import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
 
-def plot_phq2_timeseries_from_results_3(plot_data,
-                                      model_key="rf",
-                                      save_dir="results/timeseries"):
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
+def plot_phq2_timeseries_from_results_3(
+    plot_data, model_key="rf", save_dir="results/timeseries"
+):
     """
     Plot: PHQ-2-Rohdaten (Linie + Marker, getrennt nach Train/Test),
           Modell-Prädiktion + 95 %-PI.
@@ -419,75 +497,114 @@ def plot_phq2_timeseries_from_results_3(plot_data,
 
     for pseudo, d in plot_data.items():
         if model_key not in d:
-            continue                     # Modell fehlt
+            continue  # Modell fehlt
 
         # -------- Länge angleichen ---------------------------------------
-        n = min(len(d["timestamps"]),
-                len(d["phq2_raw"]),
-                len(d[model_key]["pred"]),
-                len(d[model_key]["lower"]),
-                len(d[model_key]["upper"]),
-                len(d["train_mask"]))
+        n = min(
+            len(d["timestamps"]),
+            len(d["phq2_raw"]),
+            len(d[model_key]["pred"]),
+            len(d[model_key]["lower"]),
+            len(d[model_key]["upper"]),
+            len(d["train_mask"]),
+        )
 
-        df = pd.DataFrame({
-            "ts":       pd.to_datetime(d["timestamps"][:n]),
-            "PHQ2":     d["phq2_raw"][:n],
-            "pred":     d[model_key]["pred"][:n],
-            "lower":    d[model_key]["lower"][:n],
-            "upper":    d[model_key]["upper"][:n],
-            "is_train": np.array(d["train_mask"][:n], dtype=bool)
-        }).sort_values("ts")
+        df = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(d["timestamps"][:n]),
+                "PHQ2": d["phq2_raw"][:n],
+                "pred": d[model_key]["pred"][:n],
+                "lower": d[model_key]["lower"][:n],
+                "upper": d[model_key]["upper"][:n],
+                "is_train": np.array(d["train_mask"][:n], dtype=bool),
+            }
+        ).sort_values("ts")
 
         # -------- Plot ---------------------------------------------------
         plt.figure(figsize=(10, 5))
 
         # Farben & Marker
         c_train = PLOT_STYLES["colors"]["Rohdaten_train"]
-        c_test  = PLOT_STYLES["colors"]["Rohdaten_test"]
-        m_train = "o"     # Kreismarker
-        m_test  = "s"     # Quadratmarker
+        c_test = PLOT_STYLES["colors"]["Rohdaten_test"]
+        m_train = "o"  # Kreismarker
+        m_test = "s"  # Quadratmarker
 
         # Linien (NaNs sorgen für Lücken)
-        plt.plot(df["ts"], df["PHQ2"].where(df["is_train"], np.nan),
-                 color=c_train, lw=1.3, label="Rohdaten (Train)")
-        plt.plot(df["ts"], df["PHQ2"].where(~df["is_train"], np.nan),
-                 color=c_test,  lw=1.3, label="Rohdaten (Test)")
+        plt.plot(
+            df["ts"],
+            df["PHQ2"].where(df["is_train"], np.nan),
+            color=c_train,
+            lw=1.3,
+            label="Rohdaten (Train)",
+        )
+        plt.plot(
+            df["ts"],
+            df["PHQ2"].where(~df["is_train"], np.nan),
+            color=c_test,
+            lw=1.3,
+            label="Rohdaten (Test)",
+        )
 
         # Marker darüberstreuen
-        plt.scatter(df.loc[df["is_train"], "ts"],
-                    df.loc[df["is_train"], "PHQ2"],
-                    color=c_train, marker=m_train, s=28)
-        plt.scatter(df.loc[~df["is_train"], "ts"],
-                    df.loc[~df["is_train"], "PHQ2"],
-                    color=c_test,  marker=m_test,  s=28)
+        plt.scatter(
+            df.loc[df["is_train"], "ts"],
+            df.loc[df["is_train"], "PHQ2"],
+            color=c_train,
+            marker=m_train,
+            s=28,
+        )
+        plt.scatter(
+            df.loc[~df["is_train"], "ts"],
+            df.loc[~df["is_train"], "PHQ2"],
+            color=c_test,
+            marker=m_test,
+            s=28,
+        )
 
         # Modell-Vorhersage
-        pred_color = (PLOT_STYLES["colors"]["Elasticnet"]
-                      if model_key == "elastic"
-                      else PLOT_STYLES["colors"]["RF"])
-        plt.plot(df["ts"], df["pred"],
-                 label=f"{model_key.upper()}-Pred",
-                 color=pred_color, lw=1.6)
+        pred_color = (
+            PLOT_STYLES["colors"]["Elasticnet"]
+            if model_key == "elastic"
+            else PLOT_STYLES["colors"]["RF"]
+        )
+        plt.plot(
+            df["ts"],
+            df["pred"],
+            label=f"{model_key.upper()}-Pred",
+            color=pred_color,
+            lw=1.6,
+        )
 
         # Fehlerband
-        plt.fill_between(df["ts"], df["lower"], df["upper"],
-                         color=pred_color, alpha=.25, label="95 %-PI")
+        plt.fill_between(
+            df["ts"],
+            df["lower"],
+            df["upper"],
+            color=pred_color,
+            alpha=0.25,
+            label="95 %-PI",
+        )
 
         plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
-        plt.xlabel("Datum"); plt.ylabel("PHQ-2-Score")
-        plt.legend(); plt.tight_layout()
+        plt.xlabel("Datum")
+        plt.ylabel("PHQ-2-Score")
+        plt.legend()
+        plt.tight_layout()
 
         out_path = f"{save_dir}/{pseudo}_{model_key}.png"
-        plt.savefig(out_path, dpi=300); plt.close()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
 
+
 # %% Main Processing Function
+
 
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
     rmssd_values_phq9 = []
-    plot_data = {}   
+    plot_data = {}
 
     elasticnet_feature_importances = {
         feature: []
@@ -508,10 +625,10 @@ def process_participants(df_raw, pseudonyms, target_column):
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365]
 
-        target_mask      = df_participant[target_column].notna()
-        df_model         = df_participant.loc[target_mask].reset_index(drop=True)
+        target_mask = df_participant[target_column].notna()
+        df_model = df_participant.loc[target_mask].reset_index(drop=True)
         timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
-        y_full           = df_model[target_column].to_numpy()
+        y_full = df_model[target_column].to_numpy()
 
         df_weekly = df_participant[["timestamp_utc", "woche_PHQ9_sum"]].copy()
         df_weekly.set_index("timestamp_utc", inplace=True)
@@ -535,11 +652,16 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("Splitting data into train/test sets...")
         indices = np.arange(len(X_preproc))
         X_train, X_test, y_train, y_test, idx_tr, idx_te = train_test_split(
-            X_preproc, y, indices, test_size=0.3, shuffle=True, random_state=RANDOM_STATE
+            X_preproc,
+            y,
+            indices,
+            test_size=0.3,
+            shuffle=True,
+            random_state=RANDOM_STATE,
         )
         train_mask = np.zeros(len(X_preproc), dtype=bool)
         train_mask[idx_tr] = True
-        test_mask  = ~train_mask
+        test_mask = ~train_mask
 
         try:
             # --- Elastic Net ---
@@ -580,7 +702,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # ---------- Elastic Net: Bootstrapped Prädiktionsintervall -------------
         print("Computing bootstrapped prediction intervals for Elastic Net...")
-        n_boot = 300                                   
+        n_boot = 300
         boot_preds = np.empty((n_boot, len(X_preproc)))
 
         for i in range(n_boot):
@@ -592,8 +714,8 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # Punktvorhersage = Median der Bootstrap-Verteilungen
         y_pred_elastic_full = np.median(boot_preds, axis=0)
-        en_lower            = np.percentile(boot_preds, 2.5,  axis=0)
-        en_upper            = np.percentile(boot_preds, 97.5, axis=0)
+        en_lower = np.percentile(boot_preds, 2.5, axis=0)
+        en_upper = np.percentile(boot_preds, 97.5, axis=0)
 
         # --- Random Forest ---
         print("Training Random Forest...")
@@ -615,7 +737,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         y_pred_rf_full = best_rf.predict(X_preproc)
         # ---------- Jackknife-Varianz & PI -------------------------------------
         print("Computing jackknife variance for Random Forest...")
-        rf_var   = fci.random_forest_error(best_rf, X_train.shape, X_preproc)
+        rf_var = fci.random_forest_error(best_rf, X_train.shape, X_preproc)
         rf_sigma = np.sqrt(rf_var)
         rf_lower = y_pred_rf_full - 1.96 * rf_sigma
         rf_upper = y_pred_rf_full + 1.96 * rf_sigma
@@ -648,16 +770,16 @@ def process_participants(df_raw, pseudonyms, target_column):
         }
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
-            "phq2_raw":   y_full.tolist(),
-            "train_mask": train_mask.tolist(), 
-            "test_mask": test_mask.tolist(), 
+            "phq2_raw": y_full.tolist(),
+            "train_mask": train_mask.tolist(),
+            "test_mask": test_mask.tolist(),
             "elastic": {
-                "pred":  y_pred_elastic_full.tolist(),
+                "pred": y_pred_elastic_full.tolist(),
                 "lower": en_lower.tolist(),
                 "upper": en_upper.tolist(),
             },
             "rf": {
-                "pred":  y_pred_rf_full.tolist(),
+                "pred": y_pred_rf_full.tolist(),
                 "lower": rf_lower.tolist(),
                 "upper": rf_upper.tolist(),
             },
@@ -709,7 +831,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
 # %% Run the pipeline
 # Load dataset
-df_raw = pd.read_pickle("data/df_merged_v1.pickle")
+df_raw = pd.read_pickle("data/df_merged_v2.pickle")
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"
@@ -722,14 +844,14 @@ df_raw = df_raw.dropna(subset=["pseudonym"])
 df_raw = df_raw.drop(
     columns=[
         "patient_id",
-        "total_activity_min",
-        "total_sm_rx",
-        "total_sm_tx",
-        "total_com_rx",
-        "total_com_tx",
+        # "total_activity_min",
+        # "total_sm_rx",
+        # "total_sm_tx",
+        # "total_com_rx",
+        # "total_com_tx",
     ]
 )
-df_raw = df_raw.drop_duplicates()
+# df_raw = df_raw.drop_duplicates()
 
 target_column = "abend_PHQ2_sum"
 pseudonyms = df_raw["pseudonym"].unique()
@@ -737,13 +859,15 @@ pseudonyms = df_raw["pseudonym"].unique()
 TOP_K = 15  # max number of top features to count per participant
 RANDOM_STATE = 42
 
-results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data = process_participants(
-    df_raw, pseudonyms, target_column
+results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data = (
+    process_participants(df_raw, pseudonyms, target_column)
 )
 
 # %% Plot MAE and RMSSD for each participant
-plot_mae_rmssd_bar_2(results, model_key="elastic",save_path=f"results/mae_elastic_rmssd_bar.png")
-plot_mae_rmssd_bar_2(results, model_key="rf",save_path=f"results/mae_rf_rmssd_bar.png")
+plot_mae_rmssd_bar_2(
+    results, model_key="elastic", save_path=f"results/mae_elastic_rmssd_bar.png"
+)
+plot_mae_rmssd_bar_2(results, model_key="rf", save_path=f"results/mae_rf_rmssd_bar.png")
 
 # %% Plot PHQ-2 time series with predictions
 plot_phq2_timeseries_from_results_3(plot_data, "rf")

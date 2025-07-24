@@ -9,7 +9,10 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
+import os
+
 import forestci as fci
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
@@ -210,8 +213,6 @@ def plot_mae_rmssd_bar(
     ----------
     model_key : {"elastic", "rf"}
     """
-    import matplotlib.pyplot as plt
-    import numpy as np
 
     pseudonyms = list(results_dict.keys())
     mae_vals = [
@@ -495,13 +496,6 @@ def plot_phq2_timeseries_from_results_2(
         print(f"[Info] Plot gespeichert: {out_path}")
 
 
-import os
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-
-
 def plot_phq2_timeseries_from_results_3(
     plot_data, model_key="rf", save_dir="results/timeseries"
 ):
@@ -767,6 +761,52 @@ def process_participants(df_raw, pseudonyms, target_column):
         top_rf_features = [feature_names[i] for i in top_indices]
         rf_feature_counts.update(top_rf_features)
 
+        raw_samples_not_covered_by_elastic_pi_ser = pd.Series(
+            (y < en_lower) | (y > en_upper)
+        )
+        percent_raw_samples_not_covered_by_elastic_prediction_interval = (
+            raw_samples_not_covered_by_elastic_pi_ser.value_counts().get(True, 0)
+            / len(y)
+            * 100
+        )
+        percent_raw_samples_not_covered_by_elastic_prediction_interval_train = (
+            raw_samples_not_covered_by_elastic_pi_ser.loc[train_mask]
+            .value_counts()
+            .get(True, 0)
+            / len(y)
+            * 100
+        )
+        percent_raw_samples_not_covered_by_elastic_prediction_interval_test = (
+            raw_samples_not_covered_by_elastic_pi_ser.loc[test_mask]
+            .value_counts()
+            .get(True, 0)
+            / len(y)
+            * 100
+        )
+
+        raw_samples_not_covered_by_rf_pi_ser = pd.Series(
+            (y < rf_lower) | (y > rf_upper)
+        )
+        percent_raw_samples_not_covered_by_rf_prediction_interval = (
+            raw_samples_not_covered_by_rf_pi_ser.value_counts().get(True, 0)
+            / len(y)
+            * 100
+        )
+        percent_raw_samples_not_covered_by_rf_prediction_interval_train = (
+            raw_samples_not_covered_by_rf_pi_ser.loc[train_mask]
+            .value_counts()
+            .get(True, 0)
+            / len(y)
+            * 100
+        )
+        percent_raw_samples_not_covered_by_rf_prediction_interval_test = (
+            raw_samples_not_covered_by_rf_pi_ser.loc[test_mask]
+            .value_counts()
+            .get(True, 0)
+            / len(y)
+            * 100
+        )
+
         # Store per-participant results
         results[pseudonym] = {
             "r2_elastic": r2_elastic,
@@ -774,10 +814,18 @@ def process_participants(df_raw, pseudonyms, target_column):
             "r2_rf": r2_rf,
             "mae_rf": mae_rf,
             "rmssd_phq2": rmssd_phq2,
+            "percent_raw_sample_not_covered_by_elastic_prediction_interval": percent_raw_samples_not_covered_by_elastic_prediction_interval,
+            "percent_raw_sample_not_covered_by_elastic_prediction_interval_train": percent_raw_samples_not_covered_by_elastic_prediction_interval_train,
+            "percent_raw_sample_not_covered_by_elastic_prediction_interval_test": percent_raw_samples_not_covered_by_elastic_prediction_interval_test,
+            "percent_raw_sample_not_covered_by_rf_prediction_interval": percent_raw_samples_not_covered_by_rf_prediction_interval,
+            "percent_raw_sample_not_covered_by_rf_prediction_interval_train": percent_raw_samples_not_covered_by_rf_prediction_interval_train,
+            "percent_raw_sample_not_covered_by_rf_prediction_interval_test": percent_raw_samples_not_covered_by_rf_prediction_interval_test,
             # placeholder, will fill low_variance after we compute percentiles
             "low_variance_candidate": None,
             "elastic_mae_lower_rmssd_phq2": None,
             "rf_mae_lower_rmssd_phq2": None,
+            "elastic_mae+10p_lower_rmssd_phq2": None,
+            "rf_mae+10p_lower_rmssd_phq2": None,
         }
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
@@ -816,6 +864,50 @@ def process_participants(df_raw, pseudonyms, target_column):
             results[pseudonym]["mae_rf"] < results[pseudonym]["rmssd_phq2"]
         )
         results[pseudonym]["rf_mae_lower_rmssd_phq2"] = is_rf_mae_lower_rmssd_phq2
+        is_elastic_mae_plus_10p_lower_rmssd_phq2 = (
+            results[pseudonym]["mae_elastic"] * 1.1 < results[pseudonym]["rmssd_phq2"]
+        )
+        results[pseudonym][
+            "elastic_mae+10p_lower_rmssd_phq2"
+        ] = is_elastic_mae_plus_10p_lower_rmssd_phq2
+        is_rf_mae_plus_10p_lower_rmssd_phq2 = (
+            results[pseudonym]["mae_rf"] * 1.1 < results[pseudonym]["rmssd_phq2"]
+        )
+        results[pseudonym][
+            "rf_mae+10p_lower_rmssd_phq2"
+        ] = is_rf_mae_plus_10p_lower_rmssd_phq2
+
+    # Filter importances based on criteria
+    valid_pseudonyms = {
+        p
+        for p, res in results.items()
+        if res.get("elastic_mae+10p_lower_rmssd_phq2", True)
+    }
+    print(
+        f"Valid pseudonyms after filtering: {len(valid_pseudonyms)} of {len(results)}"
+    )
+
+    filtered_elasticnet_feature_importances = {
+        feature: [
+            value
+            for i, (pseudonym, res) in enumerate(results.items())
+            if pseudonym in valid_pseudonyms
+            and i < len(elasticnet_feature_importances[feature])
+            for value in [elasticnet_feature_importances[feature][i]]
+        ]
+        for feature in elasticnet_feature_importances
+    }
+
+    filtered_rf_feature_importances = {
+        feature: [
+            value
+            for i, (pseudonym, res) in enumerate(results.items())
+            if pseudonym in valid_pseudonyms
+            and i < len(rf_feature_importances[feature])
+            for value in [rf_feature_importances[feature][i]]
+        ]
+        for feature in rf_feature_importances
+    }
 
     # Compute global feature stats
     elasticnet_stats = {
@@ -823,14 +915,15 @@ def process_participants(df_raw, pseudonyms, target_column):
             "mean": np.mean(values) if values else 0.0,
             "std": np.std(values) if values else 0.0,
         }
-        for feature, values in elasticnet_feature_importances.items()
+        for feature, values in filtered_elasticnet_feature_importances.items()
     }
+
     rf_stats = {
         feature: {
             "mean": np.mean(values) if values else 0.0,
             "std": np.std(values) if values else 0.0,
         }
-        for feature, values in rf_feature_importances.items()
+        for feature, values in filtered_rf_feature_importances.items()
     }
 
     plot_feature_importance_stats(

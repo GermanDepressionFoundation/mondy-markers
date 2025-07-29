@@ -387,7 +387,7 @@ def plot_phq2_timeseries_from_results(
             label="95 %-PI",
         )
 
-        plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
+        plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
         plt.xlabel("Datum")
         plt.ylabel("PHQ-2-Score")
         plt.legend()
@@ -482,7 +482,7 @@ def plot_phq2_timeseries_from_results_2(
             label="95 %-PI",
         )
 
-        plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
+        plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
         plt.xlabel("Datum")
         plt.ylabel("PHQ-2-Score")
         plt.legend()
@@ -545,14 +545,14 @@ def plot_phq2_timeseries_from_results_3(
             df["PHQ2"].where(df["is_train"], np.nan),
             color=c_train,
             lw=1.3,
-            label="Rohdaten (Train)",
+            label="Raw data (Train)",
         )
         plt.plot(
             df["ts"],
             df["PHQ2"].where(~df["is_train"], np.nan),
             color=c_test,
             lw=1.3,
-            label="Rohdaten (Test)",
+            label="Raw data (Test)",
         )
 
         # Marker darüberstreuen
@@ -595,7 +595,7 @@ def plot_phq2_timeseries_from_results_3(
             label="95 %-PI",
         )
 
-        plt.title(f"{pseudo} – PHQ-2 Verlauf ({model_key.upper()})")
+        plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
         plt.xlabel("Datum")
         plt.ylabel("PHQ-2-Score")
         plt.legend()
@@ -942,7 +942,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
 # %% Run the pipeline
 # Load dataset
-df_raw = pd.read_pickle("data/df_merged_v2.pickle")
+df_raw = pd.read_pickle("data/df_merged_v3.pickle")
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"

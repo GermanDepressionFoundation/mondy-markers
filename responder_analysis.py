@@ -99,53 +99,32 @@ model_winner_summary.to_csv("results/model_winner_summary.csv")
 
 # Extract RMSSD values
 rmssd_phq2_values = results_df["rmssd_phq2"].values
-rmssd_phq9_values = results_df["rmssd_phq9"].values
 
 # Compute 25th percentile thresholds
 phq2_thresh = np.nanpercentile(rmssd_phq2_values, 25)
-phq9_thresh = np.nanpercentile(rmssd_phq9_values, 25)
 
 print(f"PHQ-2 25th percentile threshold: {phq2_thresh:.3f}")
-print(f"PHQ-9 25th percentile threshold: {phq9_thresh:.3f}")
 
 # Create figure with 2 subplots
-fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharey=False)
+fig, axes = plt.subplots(1, 1, figsize=(12, 6), sharey=False)
 
 # --- Left: PHQ-2 RMSSD ---
-axes[0].boxplot(
+axes.boxplot(
     rmssd_phq2_values,
     vert=False,
     patch_artist=True,
     boxprops=dict(facecolor="skyblue", color="black"),
     medianprops=dict(color="black"),
 )
-axes[0].axvline(
+axes.axvline(
     phq2_thresh,
     color="red",
     linestyle="--",
     label=f"25th percentile = {phq2_thresh:.3f}",
 )
-axes[0].set_title("PHQ-2 RMSSD")
-axes[0].set_xlabel("RMSSD")
-axes[0].legend(loc="upper right")
-
-# --- Right: PHQ-9 RMSSD ---
-axes[1].boxplot(
-    rmssd_phq9_values,
-    vert=False,
-    patch_artist=True,
-    boxprops=dict(facecolor="lightgreen", color="black"),
-    medianprops=dict(color="black"),
-)
-axes[1].axvline(
-    phq9_thresh,
-    color="red",
-    linestyle="--",
-    label=f"25th percentile = {phq9_thresh:.3f}",
-)
-axes[1].set_title("PHQ-9 RMSSD")
-axes[1].set_xlabel("RMSSD")
-axes[1].legend(loc="upper right")
+axes.set_title("PHQ-2 RMSSD")
+axes.set_xlabel("RMSSD")
+axes.legend(loc="upper right")
 
 plt.suptitle(
     "Within-Person Symptom Variability (RMSSD) with 25th Percentile Thresholds"

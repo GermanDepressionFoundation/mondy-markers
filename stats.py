@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from IPython.display import Markdown, display
 
-df_raw = pd.read_pickle("data/df_merged_v2.pickle")
+df_raw = pd.read_pickle("data/df_merged_v3.pickle")
 df_raw = df_raw.drop(columns=["timestamp_utc", "woche_PHQ9_sum"])
 
 # Group by participant
@@ -45,10 +45,8 @@ for col in df_raw.columns:
 stats_df = pd.DataFrame(stats_data)
 
 # Save to CSV
-stats_df.to_csv("results/df_raw_column_stats_by_participant.csv", index=False)
-print(
-    "Saved participant-level column stats to results/df_raw_column_stats_by_participant.csv"
-)
+stats_df.to_csv("results/df_raw_column_stats.csv", index=False)
+print("Saved column stats to results/df_raw_column_stats.csv")
 
 # Create Markdown table for Jupyter
 markdown_table = stats_df.to_markdown(index=False)

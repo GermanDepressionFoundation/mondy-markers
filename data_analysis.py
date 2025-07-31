@@ -319,187 +319,6 @@ def plot_phq2_timeseries_from_results(
     plot_data, model_key="rf", save_dir="results/timeseries"
 ):
     """
-    Erstellt für jeden Probanden einen Zeitreihen-Plot:
-    PHQ-2-Rohwerte + Prediction ± 95 %-Intervall.
-    """
-    os.makedirs(save_dir, exist_ok=True)
-
-    def _equalize(*arrays):
-        min_len = min(map(len, arrays))
-        return [arr[:min_len] for arr in arrays]
-
-    for pseudo, d in plot_data.items():
-        if model_key not in d:
-            continue
-
-        # --- DataFrame vorbereiten ---------------------------------------
-        n = min(len(d["timestamps"]), len(d["phq2_raw"]), len(d[model_key]["pred"]))
-        df = pd.DataFrame(
-            {
-                "ts": pd.to_datetime(d["timestamps"][:n]),
-                "PHQ2": d["phq2_raw"][:n],
-                "pred": d[model_key]["pred"][:n],
-                "lower": d[model_key]["lower"][:n],
-                "upper": d[model_key]["upper"][:n],
-                "is_train": np.array(d["train_mask"][:n], dtype=bool),
-            }
-        ).sort_values("ts")
-
-        # --- Plot ---------------------------------------------------------
-        plt.figure(figsize=(10, 5))
-
-        # Rohdaten als Scatter
-        m_train = df["is_train"]
-        plt.scatter(
-            df.loc[m_train, "ts"],
-            df.loc[m_train, "PHQ2"],
-            label="train",
-            color=PLOT_STYLES["colors"]["Rohdaten_train"],
-            s=22,
-            alpha=0.9,
-        )
-        plt.scatter(
-            df.loc[~m_train, "ts"],
-            df.loc[~m_train, "PHQ2"],
-            label="test",
-            color=PLOT_STYLES["colors"]["Rohdaten_test"],
-            s=22,
-            alpha=0.9,
-        )
-
-        # Predicitons als Linie + 95 PI %-Intervall
-        pred_color = PLOT_STYLES["colors"][
-            "Elasticnet" if model_key == "elastic" else "RF"
-        ]
-        plt.plot(
-            df["ts"],
-            df["pred"],
-            label=f"{model_key.upper()}-Pred",
-            color=pred_color,
-            lw=1.5,
-        )
-        plt.fill_between(
-            df["ts"],
-            df["lower"],
-            df["upper"],
-            color=pred_color,
-            alpha=0.25,
-            label="95 %-PI",
-        )
-
-        plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
-        plt.xlabel("Datum")
-        plt.ylabel("PHQ-2-Score")
-        plt.legend()
-        plt.tight_layout()
-
-        out_path = f"{save_dir}/{pseudo}_{model_key}.png"
-        fig = plt.gcf()
-        add_logo_to_figure(fig)
-        plt.savefig(out_path, dpi=300)
-        plt.close()
-        print(f"[Info] Plot gespeichert: {out_path}")
-
-
-def plot_phq2_timeseries_from_results_2(
-    plot_data, model_key="rf", save_dir="results/timeseries"
-):
-    """
-    Plot: PHQ-2-Rohdaten (Linie, getrennt nach Train/Test, Lücken bei NaN)
-          + Modell-Prädiktion ± 95 %-PI.
-    """
-    os.makedirs(save_dir, exist_ok=True)
-
-    for pseudo, d in plot_data.items():
-        if model_key not in d:  # Modell fehlt
-            continue
-
-        # -------- Länge angleichen ---------------------------------------
-        n = min(
-            len(d["timestamps"]),
-            len(d["phq2_raw"]),
-            len(d[model_key]["pred"]),
-            len(d[model_key]["lower"]),
-            len(d[model_key]["upper"]),
-            len(d["train_mask"]),
-        )
-
-        df = pd.DataFrame(
-            {
-                "ts": pd.to_datetime(d["timestamps"][:n]),
-                "PHQ2": d["phq2_raw"][:n],
-                "pred": d[model_key]["pred"][:n],
-                "lower": d[model_key]["lower"][:n],
-                "upper": d[model_key]["upper"][:n],
-                "is_train": np.array(d["train_mask"][:n], dtype=bool),
-            }
-        ).sort_values("ts")
-
-        # -------- Plot ---------------------------------------------------
-        plt.figure(figsize=(10, 5))
-
-        # Train-Linie: Test-Werte als NaN -> Linienbruch
-        y_train_line = df["PHQ2"].where(df["is_train"], np.nan)
-        plt.plot(
-            df["ts"],
-            y_train_line,
-            label="Rohdaten (Train)",
-            color=PLOT_STYLES["colors"]["Rohdaten_train"],
-            lw=1.3,
-        )
-
-        # Test-Linie: Train-Werte als NaN
-        y_test_line = df["PHQ2"].where(~df["is_train"], np.nan)
-        plt.plot(
-            df["ts"],
-            y_test_line,
-            label="Rohdaten (Test)",
-            color=PLOT_STYLES["colors"]["Rohdaten_test"],
-            lw=1.3,
-        )
-
-        # Modell-Vorhersage
-        pred_color = (
-            PLOT_STYLES["colors"]["Elasticnet"]
-            if model_key == "elastic"
-            else PLOT_STYLES["colors"]["RF"]
-        )
-        plt.plot(
-            df["ts"],
-            df["pred"],
-            label=f"{model_key.upper()}-Pred",
-            color=pred_color,
-            lw=1.6,
-        )
-
-        # Fehlerband
-        plt.fill_between(
-            df["ts"],
-            df["lower"],
-            df["upper"],
-            color=pred_color,
-            alpha=0.25,
-            label="95 %-PI",
-        )
-
-        plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
-        plt.xlabel("Datum")
-        plt.ylabel("PHQ-2-Score")
-        plt.legend()
-        plt.tight_layout()
-
-        out_path = f"{save_dir}/{pseudo}_{model_key}.png"
-        fig = plt.gcf()
-        add_logo_to_figure(fig)
-        plt.savefig(out_path, dpi=300)
-        plt.close()
-        print(f"[Info] Plot gespeichert: {out_path}")
-
-
-def plot_phq2_timeseries_from_results_3(
-    plot_data, model_key="rf", save_dir="results/timeseries"
-):
-    """
     Plot: PHQ-2-Rohdaten (Linie + Marker, getrennt nach Train/Test),
           Modell-Prädiktion + 95 %-PI.
     """
@@ -595,8 +414,11 @@ def plot_phq2_timeseries_from_results_3(
             label="95 %-PI",
         )
 
+        # Fixed Y-axis range
+        plt.ylim(0, 21)
+
         plt.title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
-        plt.xlabel("Datum")
+        plt.xlabel("Date")
         plt.ylabel("PHQ-2-Score")
         plt.legend()
         plt.tight_layout()
@@ -607,6 +429,102 @@ def plot_phq2_timeseries_from_results_3(
         plt.savefig(out_path, dpi=300)
         plt.close()
         print(f"[Info] Plot gespeichert: {out_path}")
+
+
+def plot_phq2_test_errors_from_results(
+    plot_data, model_key="rf", save_dir="results/test_errors", show_pred_ci=True
+):
+    """
+    Plots PHQ-2 predictions vs. ground truth for test samples only,
+    including error bars (prediction intervals) and optionally prediction errors.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    for pseudo, d in plot_data.items():
+        if model_key not in d:
+            continue
+
+        n = min(len(d["timestamps"]), len(d["phq2_raw"]), len(d[model_key]["pred"]))
+        df = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(d["timestamps"][:n]),
+                "PHQ2": d["phq2_raw"][:n],
+                "pred": d[model_key]["pred"][:n],
+                "lower": d[model_key]["lower"][:n],
+                "upper": d[model_key]["upper"][:n],
+                "is_train": np.array(d["train_mask"][:n], dtype=bool),
+            }
+        ).sort_values("ts")
+
+        df_test = df[~df["is_train"]]
+
+        if df_test.empty:
+            continue
+
+        # Plot
+        plt.figure(figsize=(10, 5))
+
+        # Ground truth
+        plt.scatter(
+            df_test["ts"],
+            df_test["PHQ2"],
+            label="Ground truth (test)",
+            color="black",
+            s=25,
+            alpha=0.9,
+        )
+
+        if show_pred_ci:
+            # Predictions with error bars
+            plt.errorbar(
+                df_test["ts"],
+                df_test["pred"],
+                yerr=[
+                    df_test["pred"] - df_test["lower"],
+                    df_test["upper"] - df_test["pred"],
+                ],
+                fmt="o",
+                color="tab:blue",
+                ecolor="lightblue",
+                capsize=3,
+                label=f"{model_key.upper()} prediction ±95% PI",
+            )
+        else:
+            # Ground truth
+            plt.scatter(
+                df_test["ts"],
+                df_test["pred"],
+                label="prediction",
+                color="tab:blue",
+                s=25,
+                alpha=0.9,
+            )
+        # Optional: draw error lines
+        plt.vlines(
+            df_test["ts"],
+            df_test["PHQ2"],
+            df_test["pred"],
+            color="gray",
+            linestyle="dotted",
+            alpha=0.6,
+            label="Prediction error",
+        )
+
+        # Fixed Y-axis range
+        plt.ylim(0, 21)
+
+        plt.title(f"{pseudo} – PHQ-2 Test Predictions ({model_key.upper()})")
+        plt.xlabel("Date")
+        plt.ylabel("PHQ-2-Score")
+        plt.legend()
+        plt.tight_layout()
+
+        out_path = f"{save_dir}/{pseudo}_{model_key}_testonly.png"
+        fig = plt.gcf()
+        add_logo_to_figure(fig)
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+        print(f"[Info] Test-only plot saved: {out_path}")
 
 
 # %% Main Processing Function
@@ -981,8 +899,19 @@ plot_mae_rmssd_bar_2(
 plot_mae_rmssd_bar_2(results, model_key="rf", save_path=f"results/mae_rf_rmssd_bar.png")
 
 # %% Plot PHQ-2 time series with predictions
-plot_phq2_timeseries_from_results_3(plot_data, "rf")
-plot_phq2_timeseries_from_results_3(plot_data, "elastic")
+plot_phq2_timeseries_from_results(plot_data, "elastic")
+plot_phq2_test_errors_from_results(plot_data, "elastic")
+plot_phq2_test_errors_from_results(
+    plot_data,
+    "elastic",
+    save_dir="results/test_errors_elastic_no_ci",
+    show_pred_ci=False,
+)
+plot_phq2_timeseries_from_results(plot_data, "rf")
+plot_phq2_test_errors_from_results(plot_data, "rf")
+plot_phq2_test_errors_from_results(
+    plot_data, "rf", save_dir="results/test_errors_elastic_no_ci", show_pred_ci=False
+)
 
 # %% Save evaluation metrics
 results_df = pd.DataFrame.from_dict(results, orient="index")

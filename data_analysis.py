@@ -469,7 +469,7 @@ def plot_phq2_test_errors_from_results(
             df_test["ts"],
             df_test["PHQ2"],
             label="Ground truth (test)",
-            color="black",
+            color=PLOT_STYLES["colors"]["Rohdaten_test"],
             s=25,
             alpha=0.9,
         )
@@ -484,8 +484,12 @@ def plot_phq2_test_errors_from_results(
                     df_test["upper"] - df_test["pred"],
                 ],
                 fmt="o",
-                color="tab:blue",
-                ecolor="lightblue",
+                color=PLOT_STYLES["colors"][
+                    "Elasticnet" if model_key == "elastic" else "RF"
+                ],
+                ecolor=PLOT_STYLES["colors"][
+                    "Elasticnet" if model_key == "elastic" else "RF"
+                ],
                 capsize=3,
                 label=f"{model_key.upper()} prediction ±95% PI",
             )
@@ -495,7 +499,9 @@ def plot_phq2_test_errors_from_results(
                 df_test["ts"],
                 df_test["pred"],
                 label="prediction",
-                color="tab:blue",
+                color=PLOT_STYLES["colors"][
+                    "Elasticnet" if model_key == "elastic" else "RF"
+                ],
                 s=25,
                 alpha=0.9,
             )
@@ -864,33 +870,49 @@ df_raw = pd.read_pickle("data/df_merged_v3.pickle")
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"
-# Load the mapping into a Python dictionary
 with open(json_file_path, "r", encoding="utf-8") as f:
     id_to_pseudonym = json.load(f)
 
 df_raw["pseudonym"] = df_raw["patient_id"].map(id_to_pseudonym)
 df_raw = df_raw.dropna(subset=["pseudonym"])
-df_raw = df_raw.drop(
-    columns=[
-        "patient_id",
-        # "total_activity_min",
-        # "total_sm_rx",
-        # "total_sm_tx",
-        # "total_com_rx",
-        # "total_com_tx",
-    ]
-)
-# df_raw = df_raw.drop_duplicates()
+df_raw = df_raw.drop(columns=["patient_id"])
 
 target_column = "abend_PHQ2_sum"
 pseudonyms = df_raw["pseudonym"].unique()
 
-TOP_K = 15  # max number of top features to count per participant
+TOP_K = 15
 RANDOM_STATE = 42
+CACHE_RESULTS_PATH = "results/process_participants_results.pkl"
 
-results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data = (
-    process_participants(df_raw, pseudonyms, target_column)
-)
+# --- Load or compute process_participants results ---
+if os.path.exists(CACHE_RESULTS_PATH):
+    print(f"[Info] Loading cached results from {CACHE_RESULTS_PATH} ...")
+    cached_data = pd.read_pickle(CACHE_RESULTS_PATH)
+    (
+        results,
+        elastic_counts,
+        rf_counts,
+        elastic_stats,
+        rf_stats,
+        plot_data,
+    ) = cached_data
+else:
+    print("[Info] Computing results using process_participants ...")
+    (
+        results,
+        elastic_counts,
+        rf_counts,
+        elastic_stats,
+        rf_stats,
+        plot_data,
+    ) = process_participants(df_raw, pseudonyms, target_column)
+
+    print(f"[Info] Saving results to {CACHE_RESULTS_PATH} ...")
+    pd.to_pickle(
+        (results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data),
+        CACHE_RESULTS_PATH,
+    )
+
 
 # %% Plot MAE and RMSSD for each participant
 plot_mae_rmssd_bar_2(

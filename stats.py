@@ -6,6 +6,9 @@ import pandas as pd
 import seaborn as sns
 from IPython.display import Markdown, display
 
+sns.set_style("whitegrid")
+sns.set_palette("colorblind")
+
 # --- Load & clean data ---
 df_raw = pd.read_pickle("data/df_merged_v3.pickle")
 

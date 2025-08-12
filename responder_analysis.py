@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-RESULTS_DIR = "results_rfr2score"
+RESULTS_DIR = "results"
 results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
 
 # Sort by RF R² for consistency
@@ -49,7 +49,7 @@ plt.bar(
     color="orange",
 )
 
-plt.axhline(1.0, color="red", linestyle="--", label="MAE = 1.0 Threshold")
+plt.axhline(2.0, color="red", linestyle="--", label="MAE = 2.0 Threshold")
 plt.xticks([i + bar_width / 2 for i in indices], results_df_sorted.index, rotation=90)
 plt.ylabel("MAE")
 plt.title("MAE Comparison Across Participants")

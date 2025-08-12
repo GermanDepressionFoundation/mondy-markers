@@ -2,7 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-results_df = pd.read_csv("results/model_performance_summary.csv", index_col=0)
+RESULTS_DIR = "results_rfr2score"
+results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
 
 # Sort by RF R² for consistency
 results_df_sorted = results_df.sort_values("r2_rf")
@@ -28,7 +29,7 @@ plt.ylabel("R²")
 plt.title("R² Comparison Across Participants")
 plt.legend()
 plt.tight_layout()
-plt.savefig("results/plot_r2_comparison_per_participant.png", dpi=300)
+plt.savefig(f"{RESULTS_DIR}/plot_r2_comparison_per_participant.png", dpi=300)
 plt.close()
 
 # Combined MAE Plot
@@ -54,7 +55,7 @@ plt.ylabel("MAE")
 plt.title("MAE Comparison Across Participants")
 plt.legend()
 plt.tight_layout()
-plt.savefig("results/plot_mae_comparison_per_participant.png", dpi=300)
+plt.savefig(f"{RESULTS_DIR}/plot_mae_comparison_per_participant.png", dpi=300)
 plt.close()
 
 
@@ -75,7 +76,7 @@ responder_counts = pd.DataFrame(
 )
 
 # Save responder table
-responder_counts.to_csv("results/responder_counts.csv")
+responder_counts.to_csv(f"{RESULTS_DIR}/responder_counts.csv")
 
 # --- Model Winner Summary ---
 
@@ -95,7 +96,7 @@ def model_winner(row):
 
 results_df["model_winner"] = results_df.apply(model_winner, axis=1)
 model_winner_summary = results_df["model_winner"].value_counts()
-model_winner_summary.to_csv("results/model_winner_summary.csv")
+model_winner_summary.to_csv(f"{RESULTS_DIR}/model_winner_summary.csv")
 
 # Extract RMSSD values
 rmssd_phq2_values = results_df["rmssd_phq2"].values
@@ -130,4 +131,4 @@ plt.suptitle(
     "Within-Person Symptom Variability (RMSSD) with 25th Percentile Thresholds"
 )
 plt.tight_layout()
-plt.savefig("results/phq_rmssd_thresholds.png", dpi=300)
+plt.savefig(f"{RESULTS_DIR}/phq_rmssd_thresholds.png", dpi=300)

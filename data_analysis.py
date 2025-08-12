@@ -9,6 +9,8 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
+RESULTS_DIR = "results"
+
 import os
 
 import forestci as fci
@@ -16,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import ElasticNetCV
@@ -29,12 +31,11 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 def ensure_results_dir():
-    os.makedirs("results/models", exist_ok=True)
+    os.makedirs(f"{RESULTS_DIR}/models", exist_ok=True)
 
 
 def prepare_data(df, target_column):
-    df = df.drop(columns=["timestamp_utc", "pseudonym", "woche_PHQ9_sum"])
-    df = df.dropna(subset=[target_column])
+    df = df.drop(columns=["pseudonym", "timestamp_utc", "woche_PHQ9_sum"])
     df = df.astype(float)
     y = df[target_column].values
     X = df.drop(columns=[target_column])
@@ -49,8 +50,9 @@ def preprocess_pipeline():
                 IterativeImputer(
                     max_iter=20,
                     random_state=RANDOM_STATE,
-                    estimator=HistGradientBoostingRegressor(random_state=RANDOM_STATE),
+                    # estimator=HistGradientBoostingRegressor(random_state=RANDOM_STATE),
                 ),
+                # KNNImputer(),
             ),
             ("scaler", MinMaxScaler()),
         ]
@@ -68,7 +70,7 @@ def evaluate_and_plot_parity(y_true, y_pred, r2, mae, pseudonym, model_name, suf
     # fig = plt.gcf()
     # add_logo_to_figure(fig)
     plt.savefig(
-        f"results/models/{pseudonym}_{suffix}_{model_name}_parity.png",
+        f"{RESULTS_DIR}/models/{pseudonym}_{suffix}_{model_name}_parity.png",
         dpi=300,
         bbox_inches=None,
     )
@@ -91,7 +93,8 @@ def plot_elasticnet_coefficients(feature_names, coefficients, pseudonym):
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        f"results/models/{pseudonym}_02_elasticnet_feature_importance.png", dpi=300
+        f"{RESULTS_DIR}/models/{pseudonym}_02_elasticnet_feature_importance.png",
+        dpi=300,
     )
     plt.close()
 
@@ -103,7 +106,7 @@ def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        f"results/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
+        f"{RESULTS_DIR}/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
         dpi=300,
     )
     plt.close()
@@ -124,7 +127,7 @@ def plot_shap_summary_and_bar(shap_values, X_test, feature_names, pseudonym):
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        f"results/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
+        f"{RESULTS_DIR}/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
         dpi=300,
     )
     plt.close()
@@ -198,13 +201,13 @@ def plot_feature_importance_stats(
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        "results/feature_importance_boxplots_stacked_aligned.png",
+        f"{RESULTS_DIR}/feature_importance_boxplots_stacked_aligned.png",
         dpi=300,
     )
 
 
 def plot_mae_rmssd_bar(
-    results_dict, model_key="elastic", save_path=f"results/mae_rmssd_bar.png"
+    results_dict, model_key="elastic", save_path=f"{RESULTS_DIR}/mae_rmssd_bar.png"
 ):
     """
     Bar-Plot von MAE (Elasticnet oder RF) + RMSSD_PHQ2 pro Proband.
@@ -254,7 +257,7 @@ def plot_mae_rmssd_bar(
 
 
 def plot_mae_rmssd_bar_2(
-    results_dict, model_key="elastic", save_path="results/mae_rmssd_bar.png"
+    results_dict, model_key="elastic", save_path=f"{RESULTS_DIR}/mae_rmssd_bar.png"
 ):
     """
     Bar-Plot von MAE (Elasticnet oder RF) + RMSSD_PHQ2 pro Proband.
@@ -316,7 +319,7 @@ def plot_mae_rmssd_bar_2(
 
 
 def plot_phq2_timeseries_from_results(
-    plot_data, model_key="rf", save_dir="results/timeseries"
+    plot_data, model_key="rf", save_dir=f"{RESULTS_DIR}/timeseries"
 ):
     """
     Plot: PHQ-2-Rohdaten (Linie + Marker, getrennt nach Train/Test),
@@ -432,7 +435,7 @@ def plot_phq2_timeseries_from_results(
 
 
 def plot_phq2_test_errors_from_results(
-    plot_data, model_key="rf", save_dir="results/test_errors", show_pred_ci=True
+    plot_data, model_key="rf", save_dir=f"{RESULTS_DIR}/test_errors", show_pred_ci=True
 ):
     """
     Plots PHQ-2 predictions vs. ground truth for test samples only,
@@ -541,6 +544,9 @@ def process_participants(df_raw, pseudonyms, target_column):
     rmssd_values_phq2 = []
     plot_data = {}
 
+    df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
+    df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
+
     elasticnet_feature_importances = {
         feature: []
         for feature in df_raw.columns
@@ -559,37 +565,46 @@ def process_participants(df_raw, pseudonyms, target_column):
     for pseudonym in pseudonyms:
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365]
-
-        target_mask = df_participant[target_column].notna()
-        df_model = df_participant.loc[target_mask].reset_index(drop=True)
-        timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
-        y_full = df_model[target_column].to_numpy()
-
         # Compute RMSSD for PHQ-2
         rmssd_phq2 = compute_rmssd(df_participant["abend_PHQ2_sum"].values)
 
         # --- Prepare data ---
-        X, y, feature_names = prepare_data(df_model, target_column)
-
-        # --- Preprocessing ---
-        print(f"Preprocessing data for {pseudonym}...")
-        preproc = preprocess_pipeline()
-        X_preproc = preproc.fit_transform(X)
+        X, y, feature_names = prepare_data(df_participant, target_column)
+        indices = np.arange(len(X))
 
         # --- Train/test split ---
         print("Splitting data into train/test sets...")
-        indices = np.arange(len(X_preproc))
-        X_train, X_test, y_train, y_test, idx_tr, idx_te = train_test_split(
-            X_preproc,
+        X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+            X,
             y,
             indices,
             test_size=0.3,
             shuffle=True,
             random_state=RANDOM_STATE,
         )
-        train_mask = np.zeros(len(X_preproc), dtype=bool)
-        train_mask[idx_tr] = True
-        test_mask = ~train_mask
+
+        pipeline = preprocess_pipeline()
+        X_train_transformed = pipeline.fit_transform(X_train)
+        X_test_transformed = pipeline.transform(X_test)
+        X_transformed = pipeline.transform(X)
+
+        df = df_participant.reset_index(drop=True)
+        full_mask = df[target_column].notna()
+        train_mask = df.loc[idx_train, target_column].notna()
+        test_mask = df.loc[idx_test, target_column].notna()
+        full_train_mask = df.index.isin(idx_train) & full_mask
+        full_test_mask = df.index.isin(idx_test) & full_mask
+
+        X_train = X_train_transformed[train_mask]
+        y_train = y_train[train_mask]
+        X_test = X_test_transformed[test_mask]
+        y_test = y_test[test_mask]
+        X_traintest = X_transformed[full_mask]
+        y_traintest = y[full_mask]
+
+        full_mask = df_participant[target_column].notna()
+        df_model = df_participant.loc[full_mask]
+        timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
 
         try:
             # --- Elastic Net ---
@@ -631,14 +646,14 @@ def process_participants(df_raw, pseudonyms, target_column):
         # ---------- Elastic Net: Bootstrapped Prädiktionsintervall -------------
         print("Computing bootstrapped prediction intervals for Elastic Net...")
         n_boot = 300
-        boot_preds = np.empty((n_boot, len(X_preproc)))
+        boot_preds = np.empty((n_boot, len(X_traintest)))
 
         for i in range(n_boot):
             boot_idx = np.random.randint(0, len(X_train), len(X_train))
             X_b, y_b = X_train[boot_idx], y_train[boot_idx]
             en_b = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE + i)
             en_b.fit(X_b, y_b)
-            boot_preds[i] = en_b.predict(X_preproc)
+            boot_preds[i] = en_b.predict(X_traintest)
 
         # Punktvorhersage = Median der Bootstrap-Verteilungen
         y_pred_elastic_full = np.median(boot_preds, axis=0)
@@ -651,9 +666,15 @@ def process_participants(df_raw, pseudonyms, target_column):
         cv_params = {
             "max_depth": [4, 5, 6, 7, 8],
             "n_estimators": [75, 100, 125, 150, 175, 200],
+            "min_samples_leaf": [2, 4, 6, 8, 10],
         }
         rf_cv = GridSearchCV(
-            rf, cv_params, scoring="neg_mean_absolute_error", cv=5, n_jobs=4
+            rf,
+            cv_params,
+            scoring="r2",
+            # scoring="neg_mean_absolute_error",
+            cv=5,
+            n_jobs=4,
         )
         rf_cv.fit(X_train, y_train)
 
@@ -662,10 +683,10 @@ def process_participants(df_raw, pseudonyms, target_column):
         r2_rf = round(r2_score(y_test, y_pred_rf), 3)
         mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 3)
 
-        y_pred_rf_full = best_rf.predict(X_preproc)
+        y_pred_rf_full = best_rf.predict(X_traintest)
         # ---------- Jackknife-Varianz & PI -------------------------------------
         print("Computing jackknife variance for Random Forest...")
-        rf_var = fci.random_forest_error(best_rf, X_train.shape, X_preproc)
+        rf_var = fci.random_forest_error(best_rf, X_train.shape, X_traintest)
         rf_sigma = np.sqrt(rf_var)
         rf_lower = y_pred_rf_full - 1.96 * rf_sigma
         rf_upper = y_pred_rf_full + 1.96 * rf_sigma
@@ -686,48 +707,48 @@ def process_participants(df_raw, pseudonyms, target_column):
         rf_feature_counts.update(top_rf_features)
 
         raw_samples_not_covered_by_elastic_pi_ser = pd.Series(
-            (y < en_lower) | (y > en_upper)
+            (y_traintest < en_lower) | (y_traintest > en_upper)
         )
         percent_raw_samples_not_covered_by_elastic_prediction_interval = (
             raw_samples_not_covered_by_elastic_pi_ser.value_counts().get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
         percent_raw_samples_not_covered_by_elastic_prediction_interval_train = (
-            raw_samples_not_covered_by_elastic_pi_ser.loc[train_mask]
+            raw_samples_not_covered_by_elastic_pi_ser.loc[full_train_mask]
             .value_counts()
             .get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
         percent_raw_samples_not_covered_by_elastic_prediction_interval_test = (
-            raw_samples_not_covered_by_elastic_pi_ser.loc[test_mask]
+            raw_samples_not_covered_by_elastic_pi_ser.loc[full_test_mask]
             .value_counts()
             .get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
 
         raw_samples_not_covered_by_rf_pi_ser = pd.Series(
-            (y < rf_lower) | (y > rf_upper)
+            (y_traintest < rf_lower) | (y_traintest > rf_upper)
         )
         percent_raw_samples_not_covered_by_rf_prediction_interval = (
             raw_samples_not_covered_by_rf_pi_ser.value_counts().get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
         percent_raw_samples_not_covered_by_rf_prediction_interval_train = (
-            raw_samples_not_covered_by_rf_pi_ser.loc[train_mask]
+            raw_samples_not_covered_by_rf_pi_ser.loc[full_train_mask]
             .value_counts()
             .get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
         percent_raw_samples_not_covered_by_rf_prediction_interval_test = (
-            raw_samples_not_covered_by_rf_pi_ser.loc[test_mask]
+            raw_samples_not_covered_by_rf_pi_ser.loc[full_test_mask]
             .value_counts()
             .get(True, 0)
-            / len(y)
+            / len(y_traintest)
             * 100
         )
 
@@ -753,9 +774,9 @@ def process_participants(df_raw, pseudonyms, target_column):
         }
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
-            "phq2_raw": y_full.tolist(),
-            "train_mask": train_mask.tolist(),
-            "test_mask": test_mask.tolist(),
+            "phq2_raw": y_traintest.tolist(),
+            "train_mask": full_train_mask.tolist(),
+            "test_mask": full_test_mask.tolist(),
             "elastic": {
                 "pred": y_pred_elastic_full.tolist(),
                 "lower": en_lower.tolist(),
@@ -882,7 +903,7 @@ pseudonyms = df_raw["pseudonym"].unique()
 
 TOP_K = 15
 RANDOM_STATE = 42
-CACHE_RESULTS_PATH = "results/process_participants_results.pkl"
+CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
 
 # --- Load or compute process_participants results ---
 if os.path.exists(CACHE_RESULTS_PATH):
@@ -916,9 +937,11 @@ else:
 
 # %% Plot MAE and RMSSD for each participant
 plot_mae_rmssd_bar_2(
-    results, model_key="elastic", save_path=f"results/mae_elastic_rmssd_bar.png"
+    results, model_key="elastic", save_path=f"{RESULTS_DIR}/mae_elastic_rmssd_bar.png"
 )
-plot_mae_rmssd_bar_2(results, model_key="rf", save_path=f"results/mae_rf_rmssd_bar.png")
+plot_mae_rmssd_bar_2(
+    results, model_key="rf", save_path=f"{RESULTS_DIR}/mae_rf_rmssd_bar.png"
+)
 
 # %% Plot PHQ-2 time series with predictions
 plot_phq2_timeseries_from_results(plot_data, "elastic")
@@ -926,31 +949,34 @@ plot_phq2_test_errors_from_results(plot_data, "elastic")
 plot_phq2_test_errors_from_results(
     plot_data,
     "elastic",
-    save_dir="results/test_errors_elastic_no_ci",
+    save_dir=f"{RESULTS_DIR}/test_errors_elastic_no_ci",
     show_pred_ci=False,
 )
 plot_phq2_timeseries_from_results(plot_data, "rf")
 plot_phq2_test_errors_from_results(plot_data, "rf")
 plot_phq2_test_errors_from_results(
-    plot_data, "rf", save_dir="results/test_errors_elastic_no_ci", show_pred_ci=False
+    plot_data,
+    "rf",
+    save_dir=f"{RESULTS_DIR}/test_errors_elastic_no_ci",
+    show_pred_ci=False,
 )
 
 # %% Save evaluation metrics
 results_df = pd.DataFrame.from_dict(results, orient="index")
-results_df.to_csv("results/model_performance_summary.csv")
+results_df.to_csv(f"{RESULTS_DIR}/model_performance_summary.csv")
 
 # Save feature importance counts
 pd.Series(elastic_counts).sort_values(ascending=False).to_csv(
-    "results/elasticnet_top_features.csv"
+    f"{RESULTS_DIR}/elasticnet_top_features.csv"
 )
 pd.Series(rf_counts).sort_values(ascending=False).to_csv(
-    "results/randomforest_top_features.csv"
+    f"{RESULTS_DIR}/randomforest_top_features.csv"
 )
 
 # Save feature importance mean and stds
 pd.DataFrame(elastic_stats).T.sort_values("mean", ascending=False).to_csv(
-    "results/elasticnet_feature_importance_stats.csv"
+    f"{RESULTS_DIR}/elasticnet_feature_importance_stats.csv"
 )
 pd.DataFrame(rf_stats).T.sort_values("mean", ascending=False).to_csv(
-    "results/randomforest_feature_importance_stats.csv"
+    f"{RESULTS_DIR}/randomforest_feature_importance_stats.csv"
 )

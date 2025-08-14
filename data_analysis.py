@@ -148,8 +148,8 @@ def process_participants(df_raw, pseudonyms, target_column):
             elastic = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE)
             elastic.fit(X_train, y_train)
             y_pred_elastic = elastic.predict(X_test)
-            r2_elastic = round(r2_score(y_test, y_pred_elastic), 3)
-            mae_elastic = round(mean_absolute_error(y_test, y_pred_elastic), 3)
+            r2_elastic = round(r2_score(y_test, y_pred_elastic), 2)
+            mae_elastic = round(mean_absolute_error(y_test, y_pred_elastic), 1)
 
             evaluate_and_plot_parity(
                 RESULTS_DIR,
@@ -219,8 +219,8 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         best_rf = rf_cv.best_estimator_
         y_pred_rf = best_rf.predict(X_test)
-        r2_rf = round(r2_score(y_test, y_pred_rf), 3)
-        mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 3)
+        r2_rf = round(r2_score(y_test, y_pred_rf), 2)
+        mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 1)
 
         y_pred_rf_full = best_rf.predict(X_traintest)
         # ---------- Jackknife-Varianz & PI -------------------------------------
@@ -365,12 +365,11 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rf_mae+10p_lower_rmssd_phq2"
         ] = is_rf_mae_plus_10p_lower_rmssd_phq2
         results[pseudonym]["elastic_rsquared_and_mae_criteria"] = (
-            round(results[pseudonym]["r2_elastic"], 1) >= 0.3
-            and round(results[pseudonym]["mae_elastic"]) <= 2
+            results[pseudonym]["r2_elastic"] >= 0.3
+            and results[pseudonym]["mae_elastic"] <= 2
         )
         results[pseudonym]["rf_rsquared_and_mae_criteria"] = (
-            round(results[pseudonym]["r2_rf"], 1) >= 0.3
-            and round(results[pseudonym]["mae_rf"]) <= 2
+            results[pseudonym]["r2_rf"] >= 0.3 and results[pseudonym]["mae_rf"] <= 2
         )
 
     # Filter importances based on criteria for elastic net

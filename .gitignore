@@ -5,4 +5,5 @@
 *.pickle
 *.json
 *.html
+*.pyc
 .venv/

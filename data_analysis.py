@@ -86,12 +86,14 @@ def process_participants(df_raw, pseudonyms, target_column):
     elasticnet_feature_importances = {
         feature: []
         for feature in df_raw.columns
-        if feature not in ["pseudonym", target_column]
+        if feature
+        not in ["pseudonym", "timestamp_utc", "woche_PHQ9_sum", target_column]
     }
     rf_feature_importances = {
         feature: []
         for feature in df_raw.columns
-        if feature not in ["pseudonym", target_column]
+        if feature
+        not in ["pseudonym", "timestamp_utc", "woche_PHQ9_sum", target_column]
     }
     elasticnet_feature_counts = Counter()
     rf_feature_counts = Counter()

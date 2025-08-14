@@ -2,6 +2,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from utils import PLOT_STYLES, add_logo_to_figure
+
+plt.rcParams["font.family"] = PLOT_STYLES["font"]
+
 RESULTS_DIR = "results"
 results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
 
@@ -9,18 +13,23 @@ results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_c
 results_df_sorted = results_df.sort_values("r2_rf")
 
 # Combined R² Plot
-plt.figure(figsize=(12, 5))
+fig = plt.figure(figsize=(12, 5))
 bar_width = 0.35
 indices = range(len(results_df_sorted))
 
 plt.bar(
-    indices, results_df_sorted["r2_elastic"], width=bar_width, label="Elastic Net R²"
+    indices,
+    results_df_sorted["r2_elastic"],
+    width=bar_width,
+    label="Elastic Net R²",
+    color=PLOT_STYLES["colors"]["Elasticnet"],
 )
 plt.bar(
     [i + bar_width for i in indices],
     results_df_sorted["r2_rf"],
     width=bar_width,
     label="Random Forest R²",
+    color=PLOT_STYLES["colors"]["RF"],
 )
 
 plt.axhline(0.3, color="red", linestyle="--", label="R² = 0.3 Threshold")
@@ -29,24 +38,25 @@ plt.ylabel("R²")
 plt.title("R² Comparison Across Participants")
 plt.legend()
 plt.tight_layout()
+add_logo_to_figure(fig)
 plt.savefig(f"{RESULTS_DIR}/plot_r2_comparison_per_participant.png", dpi=300)
 plt.close()
 
 # Combined MAE Plot
-plt.figure(figsize=(12, 5))
+fig = plt.figure(figsize=(12, 5))
 plt.bar(
     indices,
     results_df_sorted["mae_elastic"],
     width=bar_width,
     label="Elastic Net MAE",
-    color="salmon",
+    color=PLOT_STYLES["colors"]["Elasticnet"],
 )
 plt.bar(
     [i + bar_width for i in indices],
     results_df_sorted["mae_rf"],
     width=bar_width,
     label="Random Forest MAE",
-    color="orange",
+    color=PLOT_STYLES["colors"]["RF"],
 )
 
 plt.axhline(2.0, color="red", linestyle="--", label="MAE = 2.0 Threshold")
@@ -55,6 +65,7 @@ plt.ylabel("MAE")
 plt.title("MAE Comparison Across Participants")
 plt.legend()
 plt.tight_layout()
+add_logo_to_figure(fig)
 plt.savefig(f"{RESULTS_DIR}/plot_mae_comparison_per_participant.png", dpi=300)
 plt.close()
 

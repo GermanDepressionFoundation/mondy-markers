@@ -7,9 +7,11 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams.update({"font.family": PLOT_STYLES["font"]})
 
+RESULT_DIR = "results"
+
 # --- Load feature importance stats ---
-elastic_csv = "results/elasticnet_feature_importance_stats.csv"
-rf_csv = "results/randomforest_feature_importance_stats.csv"
+elastic_csv = f"{RESULT_DIR}/elasticnet_feature_importance_stats.csv"
+rf_csv = f"{RESULT_DIR}/randomforest_feature_importance_stats.csv"
 
 elastic_df = pd.read_csv(elastic_csv, index_col=0)
 rf_df = pd.read_csv(rf_csv, index_col=0)
@@ -112,8 +114,8 @@ top_shift_features = merged.sort_values("abs_shift", ascending=False).head(
 # )
 
 # # --- Paths ---
-# png_path = "results/feature_importance_shift_scatter.png"
-# html_path = "results/feature_importance_shift_scatter.html"
+# png_path = f"{RESULT_DIR}/feature_importance_shift_scatter.png"
+# html_path = f"{RESULT_DIR}/feature_importance_shift_scatter.html"
 
 # # Save PNG
 # fig.write_image(png_path, scale=1)
@@ -185,10 +187,10 @@ top_shift_features = merged.sort_values("abs_shift", ascending=False).head(
 
 # Load feature importance counts
 elasticnet_features = pd.read_csv(
-    "results/elasticnet_top_features.csv", header=None, index_col=0
+    f"{RESULT_DIR}/elasticnet_top_features.csv", header=None, index_col=0
 ).squeeze("columns")
 rf_features = pd.read_csv(
-    "results/randomforest_top_features.csv", header=None, index_col=0
+    f"{RESULT_DIR}/randomforest_top_features.csv", header=None, index_col=0
 ).squeeze("columns")
 
 # Combine feature counts into a DataFrame and fill missing values
@@ -227,7 +229,7 @@ add_logo_to_figure(fig, position="top_right")
 
 plt.tight_layout()
 plt.savefig(
-    "results/aggregated_feature_importance_comparison_grouped.png",
+    f"{RESULT_DIR}/aggregated_feature_importance_comparison_grouped.png",
     dpi=300,
 )
 plt.close()
@@ -286,7 +288,7 @@ add_logo_to_figure(fig, position="top_right")
 
 plt.tight_layout()
 plt.savefig(
-    "results/aggregated_feature_importance_relative_sorted_elastic.png", dpi=300
+    f"{RESULT_DIR}/aggregated_feature_importance_relative_sorted_elastic.png", dpi=300
 )
 plt.close()
 
@@ -318,7 +320,7 @@ plt.title(f"Features (Elastic Net, normalized by max)")
 add_logo_to_figure(fig, position="top_right")
 
 plt.tight_layout()
-plt.savefig("results/elasticnet_relative_feature_importance.png", dpi=300)
+plt.savefig(f"{RESULT_DIR}/elasticnet_relative_feature_importance.png", dpi=300)
 plt.close()
 
 # --- Plot Random Forest ---
@@ -337,5 +339,5 @@ plt.title(f"Features (Random Forest, normalized by max)")
 add_logo_to_figure(fig, position="top_right")
 
 plt.tight_layout()
-plt.savefig("results/randomforest_relative_feature_importance.png", dpi=300)
+plt.savefig(f"{RESULT_DIR}/randomforest_relative_feature_importance.png", dpi=300)
 plt.close()

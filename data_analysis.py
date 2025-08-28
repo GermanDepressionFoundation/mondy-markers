@@ -3,10 +3,6 @@ import json
 import os
 from collections import Counter
 
-RESULTS_DIR = "results"
-
-import os
-
 import forestci as fci
 import numpy as np
 import pandas as pd
@@ -30,6 +26,13 @@ from plotting import (
     plot_shap_summary_and_bar,
 )
 
+RESULTS_DIR = "results"
+TOP_K = 15
+RANDOM_STATE = 42
+CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
+PHQ2_COLUMN = "abend_PHQ2_sum"
+PHQ9_COLUMN = "woche_PHQ9_sum"
+
 # %% Utility and Pipeline Functions
 
 
@@ -38,7 +41,13 @@ def ensure_results_dir():
 
 
 def prepare_data(df, target_column):
-    df = df.drop(columns=["pseudonym", "timestamp_utc", "woche_PHQ9_sum"])
+    df = df.drop(
+        columns=[
+            "pseudonym",
+            "timestamp_utc",
+            PHQ9_COLUMN if target_column == PHQ2_COLUMN else PHQ2_COLUMN,
+        ]
+    )
     df = df.astype(float)
     y = df[target_column].values
     X = df.drop(columns=[target_column])
@@ -75,6 +84,18 @@ def compute_rmssd(series):
 # %% Main Processing Function
 
 
+def months_since_start(group):
+    start_date = group["timestamp_utc"].min()
+    return (group["timestamp_utc"].dt.year - start_date.year) * 12 + (
+        group["timestamp_utc"].dt.month - start_date.month
+    )
+
+
+def days_since_start(group):
+    start_date = group["timestamp_utc"].min()
+    return (group["timestamp_utc"] - start_date).dt.days
+
+
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
@@ -82,6 +103,12 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
     df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
+    df_raw["month_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
+        months_since_start
+    )
+    df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
+        days_since_start
+    )
 
     elasticnet_feature_importances = {
         feature: []
@@ -148,7 +175,14 @@ def process_participants(df_raw, pseudonyms, target_column):
             # --- Elastic Net ---
             print("Training Elastic Net...")
             elastic = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE)
-            elastic.fit(X_train, y_train)
+
+            # Sample weights based on distance from mean due to inbalanced data
+            # weights = np.abs(y_train - y_train.mean())
+            elastic.fit(
+                X_train,
+                y_train,
+                # sample_weight=weights
+            )
             y_pred_elastic = elastic.predict(X_test)
             r2_elastic = round(r2_score(y_test, y_pred_elastic), 2)
             mae_elastic = round(mean_absolute_error(y_test, y_pred_elastic), 1)
@@ -217,7 +251,11 @@ def process_participants(df_raw, pseudonyms, target_column):
             cv=5,
             n_jobs=4,
         )
-        rf_cv.fit(X_train, y_train)
+        rf_cv.fit(
+            X_train,
+            y_train,
+            # sample_weight=weights
+        )
 
         best_rf = rf_cv.best_estimator_
         y_pred_rf = best_rf.predict(X_test)
@@ -458,12 +496,9 @@ df_raw["pseudonym"] = df_raw["patient_id"].map(id_to_pseudonym)
 df_raw = df_raw.dropna(subset=["pseudonym"])
 df_raw = df_raw.drop(columns=["patient_id"])
 
-target_column = "abend_PHQ2_sum"
+target_column = PHQ2_COLUMN
 pseudonyms = df_raw["pseudonym"].unique()
 
-TOP_K = 15
-RANDOM_STATE = 42
-CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
 
 # --- Load or compute process_participants results ---
 if os.path.exists(CACHE_RESULTS_PATH):

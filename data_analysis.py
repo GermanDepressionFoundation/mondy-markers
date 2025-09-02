@@ -2,6 +2,7 @@
 import json
 import os
 from collections import Counter
+from datetime import timedelta
 
 import forestci as fci
 import numpy as np
@@ -10,7 +11,7 @@ import shap
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
-from sklearn.linear_model import ElasticNetCV
+from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
@@ -103,9 +104,9 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
     df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
-    df_raw["month_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
-        months_since_start
-    )
+    # df_raw["month_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
+    #     months_since_start
+    # )
     df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
         days_since_start
     )
@@ -124,12 +125,19 @@ def process_participants(df_raw, pseudonyms, target_column):
     }
     elasticnet_feature_counts = Counter()
     rf_feature_counts = Counter()
+
     ensure_results_dir()
 
     # --- Per-participant loop ---
     for pseudonym in pseudonyms:
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365]
+        df_participant_timeaware = df_participant.set_index("timestamp_utc").copy()
+        y_rolling_mean = (
+            df_participant_timeaware[target_column]
+            .rolling(window=timedelta(days=2 * 7))
+            .mean()
+        )
         # Compute RMSSD for PHQ-2
         rmssd_phq2 = compute_rmssd(df_participant["abend_PHQ2_sum"].values)
 
@@ -162,6 +170,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         X_train = X_train_transformed[train_mask]
         y_train = y_train[train_mask]
+        y_train_rolling_mean = y_rolling_mean.iloc[idx_train][train_mask.values]
         X_test = X_test_transformed[test_mask]
         y_test = y_test[test_mask]
         X_traintest = X_transformed[full_mask]
@@ -170,14 +179,14 @@ def process_participants(df_raw, pseudonyms, target_column):
         full_mask = df_participant[target_column].notna()
         df_model = df_participant.loc[full_mask]
         timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
+        # weights = np.abs(y_train - y_train_rolling_mean)
+        # weights = np.ones(len(y_train))
 
         try:
             # --- Elastic Net ---
             print("Training Elastic Net...")
             elastic = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE)
 
-            # Sample weights based on distance from mean due to inbalanced data
-            # weights = np.abs(y_train - y_train.mean())
             elastic.fit(
                 X_train,
                 y_train,

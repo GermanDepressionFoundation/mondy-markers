@@ -8,32 +8,33 @@ plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
 RESULTS_DIR = "results"
 results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
-
+results_df = results_df.sort_index()
 # Sort by RF R² for consistency
-results_df_sorted = results_df.sort_values("r2_rf")
+# result_df = results_df.sort_values("r2_rf")
 
 # Combined R² Plot
 fig = plt.figure(figsize=(12, 5))
 bar_width = 0.35
-indices = range(len(results_df_sorted))
+indices = range(len(results_df))
 
 plt.bar(
     indices,
-    results_df_sorted["r2_elastic"],
+    results_df["r2_elastic"],
     width=bar_width,
     label="Elastic Net R²",
     color=PLOT_STYLES["colors"]["Elasticnet"],
 )
 plt.bar(
     [i + bar_width for i in indices],
-    results_df_sorted["r2_rf"],
+    results_df["r2_rf"],
     width=bar_width,
     label="Random Forest R²",
     color=PLOT_STYLES["colors"]["RF"],
 )
 
+plt.ylim(-1, 1.0)
 plt.axhline(0.3, color="red", linestyle="--", label="R² = 0.3 Threshold")
-plt.xticks([i + bar_width / 2 for i in indices], results_df_sorted.index, rotation=90)
+plt.xticks([i + bar_width / 2 for i in indices], results_df.index, rotation=90)
 plt.ylabel("R²")
 plt.title("R² Comparison Across Participants")
 plt.legend()
@@ -46,21 +47,22 @@ plt.close()
 fig = plt.figure(figsize=(12, 5))
 plt.bar(
     indices,
-    results_df_sorted["mae_elastic"],
+    results_df["mae_elastic"],
     width=bar_width,
     label="Elastic Net MAE",
     color=PLOT_STYLES["colors"]["Elasticnet"],
 )
 plt.bar(
     [i + bar_width for i in indices],
-    results_df_sorted["mae_rf"],
+    results_df["mae_rf"],
     width=bar_width,
     label="Random Forest MAE",
     color=PLOT_STYLES["colors"]["RF"],
 )
 
+plt.ylim(0, 5.0)
 plt.axhline(2.0, color="red", linestyle="--", label="MAE = 2.0 Threshold")
-plt.xticks([i + bar_width / 2 for i in indices], results_df_sorted.index, rotation=90)
+plt.xticks([i + bar_width / 2 for i in indices], results_df.index, rotation=90)
 plt.ylabel("MAE")
 plt.title("MAE Comparison Across Participants")
 plt.legend()

@@ -7,7 +7,7 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams.update({"font.family": PLOT_STYLES["font"]})
 
-RESULT_DIR = "results"
+RESULT_DIR = "results2"
 
 # --- Load feature importance stats ---
 elastic_csv = f"{RESULT_DIR}/elasticnet_feature_importance_stats.csv"
@@ -251,7 +251,7 @@ feature_means["RandomForest"] = (
 feature_means_sorted = feature_means.sort_values("ElasticNet", ascending=False)
 
 # Pick top N for readability
-TOP_N = len(feature_means) - 2  # TODO remove phq-9 und timestamp column beforehand
+TOP_N = len(feature_means)
 top_feature_means = feature_means_sorted.head(TOP_N)
 
 x = range(len(top_feature_means))

@@ -13,7 +13,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, RepeatedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
 
@@ -27,7 +27,7 @@ from plotting import (
     plot_shap_summary_and_bar,
 )
 
-RESULTS_DIR = "results"
+RESULTS_DIR = "results2"
 TOP_K = 15
 RANDOM_STATE = 42
 CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
@@ -41,15 +41,31 @@ def ensure_results_dir():
     os.makedirs(f"{RESULTS_DIR}/models", exist_ok=True)
 
 
+def replace_outliers_with_nan(df, multiplier=1.5):
+    df_out = df.copy()
+    Q1 = df.quantile(0.01)
+    Q3 = df.quantile(0.99)
+    IQR = Q3 - Q1
+
+    for col in df.columns:
+        lower = Q1[col] - multiplier * IQR[col]
+        upper = Q3[col] + multiplier * IQR[col]
+        mask = (df[col] < lower) | (df[col] > upper)
+        df_out.loc[mask, col] = np.nan
+    return df_out
+
+
 def prepare_data(df, target_column):
     df = df.drop(
         columns=[
             "pseudonym",
             "timestamp_utc",
             PHQ9_COLUMN if target_column == PHQ2_COLUMN else PHQ2_COLUMN,
-        ]
+        ],
+        errors="ignore",
     )
     df = df.astype(float)
+    df = replace_outliers_with_nan(df, multiplier=1.5)
     y = df[target_column].values
     X = df.drop(columns=[target_column])
     return X, y, X.columns
@@ -63,9 +79,7 @@ def preprocess_pipeline():
                 IterativeImputer(
                     max_iter=20,
                     random_state=RANDOM_STATE,
-                    # estimator=HistGradientBoostingRegressor(random_state=RANDOM_STATE),
                 ),
-                # KNNImputer(),
             ),
             ("scaler", MinMaxScaler()),
         ]
@@ -85,13 +99,6 @@ def compute_rmssd(series):
 # %% Main Processing Function
 
 
-def months_since_start(group):
-    start_date = group["timestamp_utc"].min()
-    return (group["timestamp_utc"].dt.year - start_date.year) * 12 + (
-        group["timestamp_utc"].dt.month - start_date.month
-    )
-
-
 def days_since_start(group):
     start_date = group["timestamp_utc"].min()
     return (group["timestamp_utc"] - start_date).dt.days
@@ -102,11 +109,12 @@ def process_participants(df_raw, pseudonyms, target_column):
     rmssd_values_phq2 = []
     plot_data = {}
 
+    # columns_to_drop = list(
+    #     set(df_raw.columns) - set(["timestamp_utc", "pseudonym", target_column])
+    # )
+    # df_raw = df_raw.drop(columns=columns_to_drop)
     df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
     df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
-    # df_raw["month_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
-    #     months_since_start
-    # )
     df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
         days_since_start
     )
@@ -140,6 +148,8 @@ def process_participants(df_raw, pseudonyms, target_column):
         )
         # Compute RMSSD for PHQ-2
         rmssd_phq2 = compute_rmssd(df_participant["abend_PHQ2_sum"].values)
+
+        # df_participant[target_column] = df_participant[target_column].diff()
 
         # --- Prepare data ---
         X, y, feature_names = prepare_data(df_participant, target_column)
@@ -182,10 +192,13 @@ def process_participants(df_raw, pseudonyms, target_column):
         # weights = np.abs(y_train - y_train_rolling_mean)
         # weights = np.ones(len(y_train))
 
+        # cv = RepeatedKFold(n_splits=5, n_repeats=3, random_state=RANDOM_STATE)
+        cv = 5
+
         try:
             # --- Elastic Net ---
             print("Training Elastic Net...")
-            elastic = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE)
+            elastic = ElasticNetCV(cv=cv, l1_ratio=0.5, random_state=RANDOM_STATE)
 
             elastic.fit(
                 X_train,
@@ -235,7 +248,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         for i in range(n_boot):
             boot_idx = np.random.randint(0, len(X_train), len(X_train))
             X_b, y_b = X_train[boot_idx], y_train[boot_idx]
-            en_b = ElasticNetCV(cv=5, l1_ratio=0.5, random_state=RANDOM_STATE + i)
+            en_b = ElasticNetCV(cv=cv, l1_ratio=0.5, random_state=RANDOM_STATE + i)
             en_b.fit(X_b, y_b)
             boot_preds[i] = en_b.predict(X_traintest)
 
@@ -248,9 +261,10 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("Training Random Forest...")
         rf = RandomForestRegressor(random_state=RANDOM_STATE)
         cv_params = {
-            "max_depth": [4, 5, 6, 7, 8],
-            "n_estimators": [75, 100, 125, 150, 175, 200],
+            "max_depth": [4, 6, 8, 10, 15, 20],
+            "n_estimators": [75, 100, 125, 150, 175, 200, 500, 1000],
             "min_samples_leaf": [2, 4, 6, 8, 10],
+            # "max_features": ["sqrt", 1],
         }
         rf_cv = GridSearchCV(
             rf,
@@ -494,7 +508,73 @@ def process_participants(df_raw, pseudonyms, target_column):
 
 # %% Run the pipeline
 # Load dataset
-df_raw = pd.read_pickle("data/df_merged_v3.pickle")
+df_raw = pd.read_pickle("data/df_merged_v7.pickle")
+df_raw = df_raw[
+    [
+        "patient_id",
+        "timestamp_utc",
+        "total_duration_calls_day",
+        "number_of_contacts_day",
+        "total_calling_frequency_day",
+        "nbr_missed_calls_day",
+        "total_duration_calls_night",
+        "number_of_contacts_night",
+        "total_calling_frequency_night",
+        "nbr_missed_calls_night",
+        "abend_PHQ2_sum",
+        "woche_PHQ9_sum",
+        "loudness_sma3_amean",
+        "loudness_sma3_stddevNorm",
+        "F0semitoneFrom27.5Hz_sma3nz_amean",
+        "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
+        "jitterLocal_sma3nz_amean",
+        "shimmerLocaldB_sma3nz_amean",
+        "mfcc1V_sma3nz_amean",
+        "mfcc2V_sma3nz_amean",
+        "mfcc3V_sma3nz_amean",
+        "mfcc4V_sma3nz_amean",
+        "steps_sum_rq1_day",
+        "steps_sum_rq1_night",
+        "total_com_rx_day",
+        "total_com_tx_day",
+        "total_com_rx_night",
+        "total_com_tx_night",
+        "total_sm_rx_day",
+        "total_sm_tx_day",
+        "total_sm_rx_night",
+        "total_sm_tx_night",
+        "total_sm_app_usage_day_h",
+        "total_sm_app_usage_night_h",
+        "total_com_app_usage_day_h",
+        "total_com_app_usage_night_h",
+        "HRV_SDNN_rq1_day",
+        "HRV_SD2_rq1_day",
+        "HRV_CVSD_rq1_day",
+        "HRV_LF_rq1_day",
+        "HRV_MadNN_rq1_day",
+        "number_used_ibi_datapoints_rq1_day",
+        "HRV_VHF_rq1_day",
+        "HRV_MeanNN_rq1_day",
+        "HRV_ULF_rq1_day",
+        "HRV_SDRMSSD_rq1_day",
+        "HRV_SampEn_rq1_day",
+        "HRV_SD2_rq1_night",
+        "HRV_SDNN_rq1_night",
+        "HRV_pNN50_rq1_night",
+        "number_used_ibi_datapoints_rq1_night",
+        "HRV_LF_rq1_night",
+        "HRV_MadNN_rq1_night",
+        "HRV_VHF_rq1_night",
+        "HRV_CSI_Modified_rq1_night",
+        "HRV_MeanNN_rq1_night",
+        "HRV_ULF_rq1_night",
+        "HRV_SampEn_rq1_night",
+        "total_activity_min_day",
+        "total_activity_min_night",
+        "last_night_sleep_duration",
+        "daily_sleep_duration",
+    ]
+]
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"

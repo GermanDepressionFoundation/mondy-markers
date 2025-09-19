@@ -6,7 +6,7 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
-RESULTS_DIR = "results"
+RESULTS_DIR = "results2"
 results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
 results_df = results_df.sort_index()
 # Sort by RF R² for consistency
@@ -145,3 +145,46 @@ plt.suptitle(
 )
 plt.tight_layout()
 plt.savefig(f"{RESULTS_DIR}/phq_rmssd_thresholds.png", dpi=300)
+
+# --- Elastic Net: R² (top) and MAE (bottom) in stacked subplots ---
+fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+indices = np.arange(len(results_df))
+bar_width = 0.6  # single series, wider bars
+
+# --- Top subplot: R² ---
+axes[0].bar(
+    indices,
+    results_df["r2_elastic"],
+    width=bar_width,
+    color=PLOT_STYLES["colors"]["Elasticnet"],
+    label="Elastic Net R²",
+)
+axes[0].set_ylim(-1, 1.0)
+axes[0].axhline(0.3, color="red", linestyle="--", label="R² = 0.3 Threshold")
+axes[0].set_ylabel("R²")
+axes[0].set_title("Elastic Net R² Across Participants")
+axes[0].legend(loc="upper left")
+
+# --- Bottom subplot: MAE ---
+axes[1].bar(
+    indices,
+    results_df["mae_elastic"],
+    width=bar_width,
+    color=PLOT_STYLES["colors"]["Elasticnet"],
+    label="Elastic Net MAE",
+)
+axes[1].set_ylim(0, 5.0)
+axes[1].axhline(2.0, color="red", linestyle="--", label="MAE = 2.0 Threshold")
+axes[1].set_ylabel("MAE")
+axes[1].set_title("Elastic Net MAE Across Participants")
+axes[1].legend(loc="upper left")
+
+# Shared x-axis formatting
+axes[1].set_xticks(indices)
+axes[1].set_xticklabels(results_df.index, rotation=90)
+
+plt.tight_layout()
+add_logo_to_figure(fig)
+plt.savefig(f"{RESULTS_DIR}/plot_elasticnet_r2_mae_subplots.png", dpi=300)
+plt.close()

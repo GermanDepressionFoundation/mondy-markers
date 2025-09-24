@@ -8,6 +8,9 @@ import forestci as fci
 import numpy as np
 import pandas as pd
 import shap
+from sklearn import set_config
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
@@ -15,7 +18,24 @@ from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, RepeatedKFold, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+set_config(transform_output="pandas")
+
+
+class Log1pScaler(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        pass  # add parameters here if needed (e.g., shift)
+
+    def fit(self, X, y=None):
+        return self  # stateless
+
+    def transform(self, X):
+        return np.log1p(X)
+
+    def inverse_transform(self, X):
+        return np.expm1(X)
+
 
 from plotting import (
     evaluate_and_plot_parity,
@@ -27,7 +47,7 @@ from plotting import (
     plot_shap_summary_and_bar,
 )
 
-RESULTS_DIR = "results2"
+RESULTS_DIR = "results_with_nightfeatures_perfeaturescaler"
 TOP_K = 15
 RANDOM_STATE = 42
 CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
@@ -57,18 +77,202 @@ def replace_outliers_with_nan(df, multiplier=1.5):
 
 def prepare_data(df, target_column):
     df = df.drop(
-        columns=[
-            "pseudonym",
-            "timestamp_utc",
-            PHQ9_COLUMN if target_column == PHQ2_COLUMN else PHQ2_COLUMN,
-        ],
+        columns=["pseudonym", "timestamp_utc"],
         errors="ignore",
     )
     df = df.astype(float)
-    df = replace_outliers_with_nan(df, multiplier=1.5)
     y = df[target_column].values
     X = df.drop(columns=[target_column])
+    X = replace_outliers_with_nan(X, multiplier=1.5)
     return X, y, X.columns
+
+
+COLUMNS_TO_CONSIDER = [
+    "patient_id",
+    "timestamp_utc",
+    "total_duration_calls_day",
+    "number_of_contacts_day",
+    "total_calling_frequency_day",
+    "nbr_missed_calls_day",
+    "total_duration_calls_night",
+    "number_of_contacts_night",
+    "total_calling_frequency_night",
+    "nbr_missed_calls_night",
+    "abend_PHQ2_sum",
+    "loudness_sma3_amean",
+    "loudness_sma3_stddevNorm",
+    "F0semitoneFrom27.5Hz_sma3nz_amean",
+    "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
+    "jitterLocal_sma3nz_amean",
+    "shimmerLocaldB_sma3nz_amean",
+    "mfcc1V_sma3nz_amean",
+    "mfcc2V_sma3nz_amean",
+    "mfcc3V_sma3nz_amean",
+    "mfcc4V_sma3nz_amean",
+    "steps_sum_rq1_day",
+    "steps_sum_rq1_night",
+    "total_com_rx_day",
+    "total_com_tx_day",
+    "total_com_rx_night",
+    "total_com_tx_night",
+    "total_sm_rx_day",
+    "total_sm_tx_day",
+    "total_sm_rx_night",
+    "total_sm_tx_night",
+    "total_sm_app_usage_day_h",
+    "total_sm_app_usage_night_h",
+    "total_com_app_usage_day_h",
+    "total_com_app_usage_night_h",
+    "HRV_SDNN_rq1_day",
+    "HRV_SD2_rq1_day",
+    "HRV_CVSD_rq1_day",
+    "HRV_LF_rq1_day",
+    "HRV_MadNN_rq1_day",
+    "number_used_ibi_datapoints_rq1_day",
+    "HRV_VHF_rq1_day",
+    "HRV_MeanNN_rq1_day",
+    "HRV_ULF_rq1_day",
+    "HRV_SDRMSSD_rq1_day",
+    "HRV_SampEn_rq1_day",
+    "HRV_SD2_rq1_night",
+    "HRV_SDNN_rq1_night",
+    "HRV_pNN50_rq1_night",
+    "number_used_ibi_datapoints_rq1_night",
+    "HRV_LF_rq1_night",
+    "HRV_MadNN_rq1_night",
+    "HRV_VHF_rq1_night",
+    "HRV_CSI_Modified_rq1_night",
+    "HRV_MeanNN_rq1_night",
+    "HRV_ULF_rq1_night",
+    "HRV_SampEn_rq1_night",
+    "total_activity_min_day",
+    "total_activity_min_night",
+    "last_night_sleep_duration",
+    "daily_sleep_duration",
+]
+
+LOG1P_COLS = [
+    # Schritte
+    "steps_sum_rq1_day",
+    "steps_sum_rq1_night",
+    # App Traffic / Usage
+    "total_com_rx_day",
+    "total_com_tx_day",
+    "total_com_rx_night",
+    "total_com_tx_night",
+    "total_sm_rx_day",
+    "total_sm_tx_day",
+    "total_sm_rx_night",
+    "total_sm_tx_night",
+    "total_sm_app_usage_day_h",
+    "total_sm_app_usage_night_h",
+    "total_com_app_usage_day_h",
+    "total_com_app_usage_night_h",
+    # HRV Power
+    "HRV_ULF_rq1_day",
+    "HRV_ULF_rq1_night",
+    "HRV_LF_rq1_day",
+    "HRV_LF_rq1_night",
+    "HRV_VHF_rq1_day",
+    "HRV_VHF_rq1_night",
+    # ACR Power / Intensität
+    "wake 15min power spectral sum_day",
+    "wake 30min power spectral sum_day",
+    "wake 60min power spectral sum_day",
+    "wake 60min power spectral sum_night",
+    "wake max acc 60min [g]_day",
+    "wake max acc 60min [g]_night",
+    "wake threshold equal avg duration [g]_night",
+]
+
+ZSCORE_COLS = [
+    # Calls (day/night)
+    "total_duration_calls_day",
+    "number_of_contacts_day",
+    "total_calling_frequency_day",
+    "nbr_missed_calls_day",
+    "total_duration_calls_night",
+    "number_of_contacts_night",
+    "total_calling_frequency_night",
+    "nbr_missed_calls_night",
+    # Audio-Merkmale
+    "loudness_sma3_amean",
+    "loudness_sma3_stddevNorm",
+    "F0semitoneFrom27.5Hz_sma3nz_amean",
+    "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
+    "jitterLocal_sma3nz_amean",
+    "shimmerLocaldB_sma3nz_amean",
+    "mfcc1V_sma3nz_amean",
+    "mfcc2V_sma3nz_amean",
+    "mfcc3V_sma3nz_amean",
+    "mfcc4V_sma3nz_amean",
+    # HRV Time/Nonlinear (z-score)
+    "HRV_SDNN_rq1_day",
+    "HRV_SDNN_rq1_night",
+    "HRV_SD2_rq1_day",
+    "HRV_SD2_rq1_night",
+    "HRV_MeanNN_rq1_day",
+    "HRV_MeanNN_rq1_night",
+    "HRV_MadNN_rq1_day",
+    "HRV_MadNN_rq1_night",
+    "HRV_SDRMSSD_rq1_day",
+    "HRV_SampEn_rq1_day",
+    "HRV_SampEn_rq1_night",
+    "HRV_CSI_Modified_rq1_night",
+    # ACR – Volumen/Dauern/Komplexität (z-score)
+    "total_activity_min_day",
+    "total_activity_min_night",
+    "wake intensity gradient_day",
+    "wake intensity gradient_night",
+    "wake light 60s epoch [min]_day",
+    "wake light 60s epoch [min]_night",
+    "wake mod 60s epoch [min]_day",
+    "wake mod 60s epoch [min]_night",
+    "wake vig 60s epoch [min]_day",
+    "wake vig 60s epoch [min]_night",
+    "wake light 10min bout [min]_night",
+    "wake sed 1min bout [min]_day",
+    "wake sed avg duration_day",
+    "wake sed avg duration_night",
+    "wake SLPA avg duration_day",
+    "wake MVPA avg duration_night",
+    "wake sed power law distribution_day",
+    "wake SLPA power law distribution_day",
+    "wake SLPA power law distribution_night",
+    "wake MVPA power law distribution_day",
+    "wake MVPA power law distribution_night",
+    "wake dfa alpha_day",
+    "wake dfa alpha_night",
+    "wake duration equal avg duration [min]_day",
+    "wake duration equal avg duration [min]_night",
+    "wake 15min sparc_day",
+    "wake 30min sparc_day",
+    "wake 60min sparc_day",
+    "wake 60min signal entropy_day",
+    "wake 60min sample entropy_day",
+    "wake 60min permutation entropy_day",
+    "wake 15min spectral entropy_night",
+    "wake 30min spectral entropy_night",
+    "wake 60min sample entropy_night",
+    # Sleep-Dauern
+    "last_night_sleep_duration",
+    "daily_sleep_duration",
+    "nightly_sleep_duration_18_24",
+    "nightly_sleep_duration_00_06",
+]
+
+feature_scalers = {}
+for col in list(set(LOG1P_COLS).intersection(set(COLUMNS_TO_CONSIDER))):
+    feature_scalers[col] = Log1pScaler()
+for col in list(set(ZSCORE_COLS).intersection(set(COLUMNS_TO_CONSIDER))):
+    feature_scalers[col] = StandardScaler()
+
+pre_scalers = ColumnTransformer(
+    transformers=[
+        (f"scale_{col}", scaler, [col]) for col, scaler in feature_scalers.items()
+    ],
+    remainder=StandardScaler(),  # keep any other columns (e.g., timestamps)
+)
 
 
 def preprocess_pipeline():
@@ -77,10 +281,10 @@ def preprocess_pipeline():
             (
                 "imputer",
                 IterativeImputer(
-                    max_iter=20,
-                    random_state=RANDOM_STATE,
+                    max_iter=20, random_state=RANDOM_STATE, keep_empty_features=True
                 ),
             ),
+            ("per_feature_scalers", pre_scalers),
             ("scaler", MinMaxScaler()),
         ]
     )
@@ -167,9 +371,13 @@ def process_participants(df_raw, pseudonyms, target_column):
         )
 
         pipeline = preprocess_pipeline()
-        X_train_transformed = pipeline.fit_transform(X_train)
-        X_test_transformed = pipeline.transform(X_test)
-        X_transformed = pipeline.transform(X)
+        X_train_transformed = pipeline.fit_transform(
+            pd.DataFrame(X_train, columns=feature_names)
+        )
+        X_test_transformed = pipeline.transform(
+            pd.DataFrame(X_test, columns=feature_names)
+        )
+        X_transformed = pipeline.transform(pd.DataFrame(X, columns=feature_names))
 
         df = df_participant.reset_index(drop=True)
         full_mask = df[target_column].notna()
@@ -178,16 +386,16 @@ def process_participants(df_raw, pseudonyms, target_column):
         full_train_mask = df.index.isin(idx_train) & full_mask
         full_test_mask = df.index.isin(idx_test) & full_mask
 
-        X_train = X_train_transformed[train_mask]
-        y_train = y_train[train_mask]
+        X_train = X_train_transformed[train_mask.values]
+        y_train = y_train[train_mask.values]
         y_train_rolling_mean = y_rolling_mean.iloc[idx_train][train_mask.values]
-        X_test = X_test_transformed[test_mask]
-        y_test = y_test[test_mask]
-        X_traintest = X_transformed[full_mask]
-        y_traintest = y[full_mask]
+        X_test = X_test_transformed[test_mask.values]
+        y_test = y_test[test_mask.values]
+        X_traintest = X_transformed[full_mask.values]
+        y_traintest = y[full_mask.values]
 
         full_mask = df_participant[target_column].notna()
-        df_model = df_participant.loc[full_mask]
+        df_model = df_participant.loc[full_mask.values]
         timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
         # weights = np.abs(y_train - y_train_rolling_mean)
         # weights = np.ones(len(y_train))
@@ -247,7 +455,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         for i in range(n_boot):
             boot_idx = np.random.randint(0, len(X_train), len(X_train))
-            X_b, y_b = X_train[boot_idx], y_train[boot_idx]
+            X_b, y_b = X_train.iloc[boot_idx], y_train[boot_idx]
             en_b = ElasticNetCV(cv=cv, l1_ratio=0.5, random_state=RANDOM_STATE + i)
             en_b.fit(X_b, y_b)
             boot_preds[i] = en_b.predict(X_traintest)
@@ -509,72 +717,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 # %% Run the pipeline
 # Load dataset
 df_raw = pd.read_pickle("data/df_merged_v7.pickle")
-df_raw = df_raw[
-    [
-        "patient_id",
-        "timestamp_utc",
-        "total_duration_calls_day",
-        "number_of_contacts_day",
-        "total_calling_frequency_day",
-        "nbr_missed_calls_day",
-        "total_duration_calls_night",
-        "number_of_contacts_night",
-        "total_calling_frequency_night",
-        "nbr_missed_calls_night",
-        "abend_PHQ2_sum",
-        "woche_PHQ9_sum",
-        "loudness_sma3_amean",
-        "loudness_sma3_stddevNorm",
-        "F0semitoneFrom27.5Hz_sma3nz_amean",
-        "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
-        "jitterLocal_sma3nz_amean",
-        "shimmerLocaldB_sma3nz_amean",
-        "mfcc1V_sma3nz_amean",
-        "mfcc2V_sma3nz_amean",
-        "mfcc3V_sma3nz_amean",
-        "mfcc4V_sma3nz_amean",
-        "steps_sum_rq1_day",
-        "steps_sum_rq1_night",
-        "total_com_rx_day",
-        "total_com_tx_day",
-        "total_com_rx_night",
-        "total_com_tx_night",
-        "total_sm_rx_day",
-        "total_sm_tx_day",
-        "total_sm_rx_night",
-        "total_sm_tx_night",
-        "total_sm_app_usage_day_h",
-        "total_sm_app_usage_night_h",
-        "total_com_app_usage_day_h",
-        "total_com_app_usage_night_h",
-        "HRV_SDNN_rq1_day",
-        "HRV_SD2_rq1_day",
-        "HRV_CVSD_rq1_day",
-        "HRV_LF_rq1_day",
-        "HRV_MadNN_rq1_day",
-        "number_used_ibi_datapoints_rq1_day",
-        "HRV_VHF_rq1_day",
-        "HRV_MeanNN_rq1_day",
-        "HRV_ULF_rq1_day",
-        "HRV_SDRMSSD_rq1_day",
-        "HRV_SampEn_rq1_day",
-        "HRV_SD2_rq1_night",
-        "HRV_SDNN_rq1_night",
-        "HRV_pNN50_rq1_night",
-        "number_used_ibi_datapoints_rq1_night",
-        "HRV_LF_rq1_night",
-        "HRV_MadNN_rq1_night",
-        "HRV_VHF_rq1_night",
-        "HRV_CSI_Modified_rq1_night",
-        "HRV_MeanNN_rq1_night",
-        "HRV_ULF_rq1_night",
-        "HRV_SampEn_rq1_night",
-        "total_activity_min_day",
-        "total_activity_min_night",
-        "last_night_sleep_duration",
-        "daily_sleep_duration",
-    ]
-]
+df_raw = df_raw[COLUMNS_TO_CONSIDER]
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"

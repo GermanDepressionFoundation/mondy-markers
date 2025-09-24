@@ -7,7 +7,7 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams.update({"font.family": PLOT_STYLES["font"]})
 
-RESULT_DIR = "results2"
+RESULT_DIR = "results_with_nightfeatures_perfeaturescaler"
 
 # --- Load feature importance stats ---
 elastic_csv = f"{RESULT_DIR}/elasticnet_feature_importance_stats.csv"

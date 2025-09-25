@@ -47,7 +47,7 @@ from plotting import (
     plot_shap_summary_and_bar,
 )
 
-RESULTS_DIR = "results_with_nightfeatures_perfeaturescaler"
+RESULTS_DIR = "results_with_nightandacrfeatures_standardscaler"
 TOP_K = 15
 RANDOM_STATE = 42
 CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
@@ -87,7 +87,7 @@ def prepare_data(df, target_column):
     return X, y, X.columns
 
 
-COLUMNS_TO_CONSIDER = [
+DAY_AND_NIGHT_FEATURES = [
     "patient_id",
     "timestamp_utc",
     "total_duration_calls_day",
@@ -149,6 +149,59 @@ COLUMNS_TO_CONSIDER = [
     "total_activity_min_night",
     "last_night_sleep_duration",
     "daily_sleep_duration",
+]
+
+ACR_FEATURES = [
+    "wake intensity gradient_day",
+    "wake ig r-squared_day",
+    "wake max acc 60min [g]_day",
+    "wake light 60s epoch [min]_day",
+    "wake mod 60s epoch [min]_day",
+    "wake vig 60s epoch [min]_day",
+    "wake sed 1min bout [min]_day",
+    "wake sed avg duration_day",
+    "wake sed transition probability_day",
+    "wake sed gini index_day",
+    "wake sed power law distribution_day",
+    "wake SLPA avg duration_day",
+    "wake SLPA gini index_day",
+    "wake SLPA power law distribution_day",
+    "wake MVPA transition probability_day",
+    "wake MVPA gini index_day",
+    "wake MVPA avg hazard_day",
+    "wake MVPA power law distribution_day",
+    "wake dfa alpha_day",
+    "wake dfa activity balance index_day",
+    "wake duration equal avg duration [min]_day",
+    "wake 15min power spectral sum_day",
+    "wake 15min sparc_day",
+    "wake 30min power spectral sum_day",
+    "wake 30min sparc_day",
+    "wake 60min signal entropy_day",
+    "wake 60min sample entropy_day",
+    "wake 60min permutation entropy_day",
+    "wake 60min power spectral sum_day",
+    "wake 60min sparc_day",
+    "wake intensity gradient_night",
+    "wake ig r-squared_night",
+    "wake max acc 60min [g]_night",
+    "wake light 60s epoch [min]_night",
+    "wake mod 60s epoch [min]_night",
+    "wake vig 60s epoch [min]_night",
+    "wake light 10min bout [min]_night",
+    "wake sed avg duration_night",
+    "wake SLPA transition probability_night",
+    "wake SLPA power law distribution_night",
+    "wake MVPA avg duration_night",
+    "wake MVPA power law distribution_night",
+    "wake dfa alpha_night",
+    "wake dfa activity balance index_night",
+    "wake threshold equal avg duration [g]_night",
+    "wake duration equal avg duration [min]_night",
+    "wake 15min spectral entropy_night",
+    "wake 30min spectral entropy_night",
+    "wake 60min sample entropy_night",
+    "wake 60min power spectral sum_night",
 ]
 
 LOG1P_COLS = [
@@ -261,6 +314,8 @@ ZSCORE_COLS = [
     "nightly_sleep_duration_00_06",
 ]
 
+COLUMNS_TO_CONSIDER = DAY_AND_NIGHT_FEATURES + ACR_FEATURES
+
 feature_scalers = {}
 for col in list(set(LOG1P_COLS).intersection(set(COLUMNS_TO_CONSIDER))):
     feature_scalers[col] = Log1pScaler()
@@ -271,7 +326,7 @@ pre_scalers = ColumnTransformer(
     transformers=[
         (f"scale_{col}", scaler, [col]) for col, scaler in feature_scalers.items()
     ],
-    remainder=StandardScaler(),  # keep any other columns (e.g., timestamps)
+    remainder=StandardScaler(),
 )
 
 
@@ -284,8 +339,8 @@ def preprocess_pipeline():
                     max_iter=20, random_state=RANDOM_STATE, keep_empty_features=True
                 ),
             ),
-            ("per_feature_scalers", pre_scalers),
-            ("scaler", MinMaxScaler()),
+            # ("per_feature_scalers", pre_scalers),
+            ("scaler", StandardScaler()),
         ]
     )
 

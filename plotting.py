@@ -1,9 +1,15 @@
 import os
 
+os.environ["MPLBACKEND"] = "Agg"   # muss vor matplotlib-Import passieren
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.ioff()  # interaktiven Modus deaktivieren
+
 import numpy as np
 import pandas as pd
 import shap
+from sklearn.model_selection import TimeSeriesSplit
 
 from utils import PLOT_STYLES, add_logo_to_figure
 
@@ -61,7 +67,7 @@ def plot_shap_summary_and_bar(
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        f"{results_dir}/models/{pseudonym}_04_rf_feature_importance_shap_summary.png",
+        f"{results_dir}/models/{pseudonym}_04_feature_importance_shap_summary.png",
         dpi=300,
     )
     plt.close()
@@ -82,7 +88,7 @@ def plot_shap_summary_and_bar(
     fig = plt.gcf()
     add_logo_to_figure(fig)
     plt.savefig(
-        f"{results_dir}/models/{pseudonym}_05_rf_feature_importance_shap_mean_feature_contributions.png",
+        f"{results_dir}/models/{pseudonym}_05_feature_importance_shap_mean_feature_contributions.png",
         dpi=300,
     )
     plt.close()
@@ -503,3 +509,109 @@ def plot_phq2_test_errors_from_results(
         plt.savefig(out_path, dpi=300)
         plt.close()
         print(f"[Info] Test-only plot saved: {out_path}")
+
+def tss_indices(n_samples: int, n_splits: int = 5):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    for fold, (tr, te) in enumerate(tscv.split(np.arange(n_samples)), start=1):
+        yield fold, tr, te
+
+def plot_tss(n_samples: int = 365, n_splits: int = 5, gap: int = 0):
+    """
+    Visualisiert TimeSeriesSplit: Train (blau), Embargo/GAP (grau, optional), Test (orange).
+    GAP wird nur im Plot gezeigt – sklearn setzt ihn nicht automatisch um.
+    """
+    fig, ax = plt.subplots(figsize=(10, 1 + 0.4*n_splits))
+    y = 0
+    for fold, tr, te in tss_indices(n_samples, n_splits):
+        # optionaler GAP/Embargo (nur Visualisierung)
+        if gap > 0:
+            te_start = te.min()
+            tr = tr[tr < (te_start - gap)]
+            gap_idx = np.arange(te_start - gap, te_start)
+        else:
+            gap_idx = np.array([], dtype=int)
+
+        ax.plot(tr, np.full_like(tr, y), "|", markersize=10, label="Train" if fold==1 else "", color="tab:blue")
+        if gap_idx.size > 0:
+            ax.plot(gap_idx, np.full_like(gap_idx, y), "|", markersize=10, label="GAP" if fold==1 else "", color="0.7")
+        ax.plot(te, np.full_like(te, y), "|", markersize=10, label="Test" if fold==1 else "", color="tab:orange")
+        ax.text(n_samples + 3, y, f"Fold {fold}", va="center", fontsize=9)
+        y += 1
+
+    ax.set_ylim(-1, y)
+    ax.set_xlim(-2, n_samples + 20)
+    ax.set_yticks([])
+    ax.set_xlabel("Tag")
+    ax.legend(loc="upper left", ncols=3)
+    ax.set_title(f"TimeSeriesSplit (n_splits={n_splits}, GAP={gap})")
+    plt.tight_layout()
+    plt.show()
+
+def plot_fold_metrics(df_metrics, out_dir, pseudonym, model_label):
+    # x-Achse: Datum (falls vorhanden), sonst Fold-Nummer
+    if df_metrics["fold_end_ts"].notna().any():
+        x = pd.to_datetime(df_metrics["fold_end_ts"])
+        xlab = "Fold-Ende (Datum)"
+    else:
+        x = df_metrics["fold"]
+        xlab = "Fold"
+
+    plt.figure(figsize=(8,4.5))
+    plt.plot(x, df_metrics["r2"], marker="o", label=f"{model_label} R²")
+    plt.plot(x, df_metrics["r2_baseline_last"], marker="x", linestyle="--", label="Baseline (last) R²")
+    plt.plot(x, df_metrics["r2_baseline_mean"], marker="x", linestyle=":",  label="Baseline (mean) R²")
+    plt.axhline(0.0, color="gray", linewidth=1)
+    plt.title(f"{pseudonym}: R² über Folds – {model_label}")
+    plt.xlabel(xlab); plt.ylabel("R²"); plt.legend(); plt.tight_layout()
+    fn = os.path.join(out_dir, f"{pseudonym}_{model_label}_fold_r2.png")
+    plt.savefig(fn, dpi=150); plt.close()
+
+
+def plot_timeseries_with_folds(
+    timestamps, y, splits, metrics_df, out_path, title="PHQ-2 mit Test-Folds"
+):
+    """
+    Zeichnet die PHQ-2 Zeitreihe, markiert jedes Testfenster (Fold) als Bereich
+    und schreibt R²/MAE aus metrics_df in die Mitte des Testbereichs.
+    """
+    ts = pd.to_datetime(pd.Series(timestamps))  # robust gegen string/datetime
+    y = pd.Series(y).astype(float).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.plot(ts, y, lw=1.5, label="PHQ-2")
+
+    # y-Position für Annotationen (oben im Plot)
+    y_top = np.nanmax(y)
+    pad = (np.nanmax(y) - np.nanmin(y)) * 0.05 if np.isfinite(y_top) else 1.0
+    y_annot = y_top + pad * 0.2 if np.isfinite(y_top) else 1.0
+
+    for fold_id, (tr, te) in enumerate(splits, 1):
+        if len(te) == 0:
+            continue
+        start_ts = ts.iloc[te[0]]
+        end_ts   = ts.iloc[te[-1]]
+        mid_ts   = start_ts + (end_ts - start_ts) / 2
+
+        # Testbereich einfärben
+        ax.axvspan(start_ts, end_ts, color="tab:orange", alpha=0.18)
+
+        # Metriken aus df
+        row = metrics_df.loc[metrics_df["fold"] == fold_id]
+        if not row.empty:
+            r2  = row["r2"].values[0]
+            mae = row["mae"].values[0]
+            ax.text(
+                mid_ts, y_annot,
+                f"Fold {fold_id}\nR²={r2:.2f}, MAE={mae:.2f}",
+                ha="center", va="bottom", fontsize=8,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.8)
+            )
+
+    ax.set_title(title)
+    ax.set_xlabel("Zeit")
+    ax.set_ylabel("PHQ-2")
+    ax.grid(alpha=0.2)
+    ax.legend(loc="upper left")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)

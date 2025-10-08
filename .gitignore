@@ -7,4 +7,6 @@
 *.html
 *.pyc
 .venv/
+.mondy_markers/
 *.log
+*.joblib

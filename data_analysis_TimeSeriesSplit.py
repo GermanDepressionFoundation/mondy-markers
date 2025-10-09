@@ -161,6 +161,8 @@ from plotting import (
     plot_phq2_timeseries_from_results,
     plot_shap_summary_and_bar,
     plot_timeseries_with_folds,
+    plot_importance_bars,
+    plot_folds_on_timeseries,
 )
 
 # %% Utility and Pipeline Functions ============================================
@@ -458,6 +460,164 @@ def evaluate_over_splits(
 
     return pd.DataFrame(rows)
 
+def run_explain_over_splits(
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+    make_model,                    # callable -> unfit model (EN/RF/...)
+    shap_kind: str = "auto",       # "linear", "tree", "auto"
+    compute_shap: bool = True,
+    compute_pi: bool = True,
+    n_splits: int = 5,
+    test_size: int = 30,
+    embargo: int = 0,
+    min_train_size: int = 90,
+    n_repeats: int = 50,
+    random_state: int = 42,
+):
+    """
+    Expanding-Rolling über Zeit. Pro Fold:
+      - Preprocessing (fit auf Train) -> Modell fit
+      - Test-Metriken (R2/MAE)
+      - optional: SHAP auf Test (Background = Train)
+      - optional: Permutation Importance auf Test (ΔR2/ΔMAE)
+    Rückgabe: dict mit DataFrames.
+    """
+    splits = rolling_origin_splits(
+        n_samples=len(y),
+        n_splits=n_splits,
+        test_size=test_size,
+        embargo=embargo,
+        min_train_size=min_train_size,
+    )
+
+    rng = np.random.default_rng(random_state)
+    fold_rows = []
+    shap_rows = []
+    pi_rows = []
+
+    for fold_id, (tr, te) in enumerate(splits, start=1):
+        # --- Preprocessing nur auf TRAIN fitten (keine Leckage)
+        pp = preprocess_pipeline()
+        Xt_tr = pp.fit_transform(X_df.iloc[tr])
+        Xt_te = pp.transform(X_df.iloc[te])
+
+        # --- Modell fitten
+        model = make_model()
+        model.fit(Xt_tr, y[tr])
+
+        # --- Test-Metriken
+        y_hat = model.predict(Xt_te)
+        R2 = r2_score(y[te], y_hat)
+        MAE = mean_absolute_error(y[te], y_hat)
+        fold_rows.append({
+            "fold": fold_id,
+            "r2": float(R2),
+            "mae": float(MAE),
+            "n_train": int(len(tr)),
+            "n_test": int(len(te)),
+            "train_end_idx": int(tr[-1]),
+            "test_start_idx": int(te[0]),
+            "test_end_idx": int(te[-1]),
+        })
+
+        # --- SHAP
+        if compute_shap:
+            try:
+                if shap_kind == "linear":
+                    explainer = shap.LinearExplainer(model, Xt_tr)
+                    shap_vals = explainer.shap_values(Xt_te)
+                elif shap_kind == "tree":
+                    explainer = shap.TreeExplainer(model)
+                    shap_vals = explainer.shap_values(Xt_te)
+                else:
+                    expl = shap.Explainer(model, Xt_tr)
+                    expl_out = expl(Xt_te)
+                    shap_vals = getattr(expl_out, "values", expl_out)
+            except Exception:
+                expl = shap.Explainer(model, Xt_tr)
+                expl_out = expl(Xt_te)
+                shap_vals = getattr(expl_out, "values", expl_out)
+
+            cols = [str(c).split("__")[-1] for c in list(Xt_te.columns)]
+            mean_abs = np.abs(shap_vals).mean(axis=0)
+            mean_signed = np.asarray(shap_vals).mean(axis=0)
+            for f, a, s in zip(cols, mean_abs, mean_signed):
+                shap_rows.append({
+                    "fold": fold_id,
+                    "feature": f,
+                    "mean_abs_shap": float(a),
+                    "mean_signed_shap": float(s),
+                })
+
+        # --- Permutation Importance – auf Testfenster
+        if compute_pi:
+            cols = list(Xt_te.columns)
+            # Baseline für deltas
+            y_hat_base = y_hat
+            R2_base = R2
+            MAE_base = MAE
+            for j, col in enumerate(cols):
+                dR2_list, dMAE_list = [], []
+                for _ in range(n_repeats):
+                    Xp = Xt_te.copy(deep=True)                # DataFrame behalten (Namen!)
+                    perm = rng.permutation(len(Xp))
+                    Xp.iloc[:, j] = Xp.iloc[perm, j].to_numpy()
+                    y_hat_p = model.predict(Xp)
+                    dR2_list.append(R2_base - r2_score(y[te], y_hat_p))
+                    dMAE_list.append(mean_absolute_error(y[te], y_hat_p) - MAE_base)
+                pi_rows.append({
+                    "fold": fold_id,
+                    "feature": str(col).split("__")[-1],
+                    "delta_R2": float(np.mean(dR2_list)),
+                    "delta_MAE": float(np.mean(dMAE_list)),
+                })
+
+    fold_metrics_df = pd.DataFrame(fold_rows)
+
+    shap_folds_df = pd.DataFrame(shap_rows) if compute_shap else None
+    shap_summary_df = (shap_folds_df.groupby("feature")[["mean_abs_shap","mean_signed_shap"]]
+                       .median().sort_values("mean_abs_shap", ascending=False).reset_index()
+                       ) if compute_shap and not shap_folds_df.empty else None
+
+    pi_folds_df = pd.DataFrame(pi_rows) if compute_pi else None
+    pi_summary_df = (pi_folds_df.groupby("feature")[["delta_R2","delta_MAE"]]
+                     .median().sort_values("delta_R2", ascending=False).reset_index()
+                     ) if compute_pi and not pi_folds_df.empty else None
+
+    return {
+        "fold_metrics_df": fold_metrics_df,
+        "shap_folds_df": shap_folds_df,
+        "shap_summary_df": shap_summary_df,
+        "pi_folds_df": pi_folds_df,
+        "pi_summary_df": pi_summary_df,
+    }
+
+# Save-Helper für die Ergebnisse aus run_explain_over_splits
+def save_explain_outputs(res_dict: dict, results_dir: str, pseudonym: str, model_tag: str):
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Folds-Metriken
+    fm = res_dict.get("fold_metrics_df", None)
+    if fm is not None and not fm.empty:
+        fm.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_fold_metrics.csv"), index=False)
+
+    # SHAP
+    sf = res_dict.get("shap_folds_df", None)
+    ss = res_dict.get("shap_summary_df", None)
+    if sf is not None and not sf.empty:
+        sf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_folds.csv"), index=False)
+    if ss is not None and not ss.empty:
+        ss.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_summary.csv"), index=False)
+
+    # Permutation Importance
+    pf = res_dict.get("pi_folds_df", None)
+    ps = res_dict.get("pi_summary_df", None)
+    if pf is not None and not pf.empty:
+        pf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_folds.csv"), index=False)
+    if ps is not None and not ps.empty:
+        ps.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_summary.csv"), index=False)
+
+
 
 # %% Main Processing Function ===================================================
 def days_since_start(group):
@@ -609,7 +769,6 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         print(f"RF R2={r2_rf}, MAE={mae_rf}, n_estimators={model_rf.n_estimators}, max_depth={model_rf.max_depth}, min_samples_leaf={model_rf.min_samples_leaf}")
         print("mean(|SHAP|):", float(np.nanmean(np.abs(rf_shap_values))))
-        print("Wichtigste Features (SHAP):", rf_feat_names[np.argsort(-np.abs(rf_shap_values).mean(0))[:5]])
         # Modelle speichern
         joblib.dump(best_rf, os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"))
 
@@ -627,77 +786,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             "elastic": {"pred": list(best_en.predict(X)), "lower": None, "upper": None},
             "rf": {"pred": list(best_rf.predict(X)), "lower": None, "upper": None},
         }
-
-        # ==================== Rolling PI & Rolling SHAP ========================
-        print("  [EN] Rolling PI/SHAP ...")
-        # final HP für EN aus GridSearch
-        en_final = ElasticNet(alpha=best_alpha, l1_ratio=best_l1, max_iter=10000, random_state=RANDOM_STATE)
-
-        imp_folds_en, imp_sum_en = run_feature_permutation_importance_over_splits(
-            X_df=X, y=y,
-            n_splits=CONFIG["pi"]["n_splits"],
-            test_size=CONFIG["pi"]["test_size"],
-            embargo=CONFIG["pi"]["embargo"],
-            min_train_size=CONFIG["pi"]["min_train_size"],
-            estimator=en_final,
-            n_repeats=CONFIG["pi"]["n_repeats"],
-            agg=CONFIG["pi"]["agg"],
-            random_state=RANDOM_STATE,
-        )
-        shap_folds_en, shap_sum_en = run_shap_over_splits(
-            X_df=X, y=y,
-            n_splits=CONFIG["shap"]["n_splits"],
-            test_size=CONFIG["shap"]["test_size"],
-            embargo=CONFIG["shap"]["embargo"],
-            min_train_size=CONFIG["shap"]["min_train_size"],
-            estimator=en_final,
-            explainer_kind="linear",
-            agg=CONFIG["shap"]["agg"],
-            random_state=RANDOM_STATE,
-        )
-        imp_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_folds.csv"), index=False)
-        imp_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_summary.csv"), index=False)
-        shap_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_folds.csv"), index=False)
-        shap_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary.csv"), index=False)
-
-        print("  [RF] Rolling PI/SHAP ...")
-        # final HP für RF aus GridSearch
-        rf_params = {
-            "n_estimators": best_rf.get_params()["model__n_estimators"],
-            "max_depth": best_rf.get_params()["model__max_depth"],
-            "min_samples_leaf": best_rf.get_params()["model__min_samples_leaf"],
-            "random_state": RANDOM_STATE,
-        }
-        rf_final = RandomForestRegressor(**rf_params)
-
-        imp_folds_rf, imp_sum_rf = run_feature_permutation_importance_over_splits(
-            X_df=X, y=y,
-            n_splits=CONFIG["pi"]["n_splits"],
-            test_size=CONFIG["pi"]["test_size"],
-            embargo=CONFIG["pi"]["embargo"],
-            min_train_size=CONFIG["pi"]["min_train_size"],
-            estimator=rf_final,
-            n_repeats=CONFIG["pi"]["n_repeats"],
-            agg=CONFIG["pi"]["agg"],
-            random_state=RANDOM_STATE,
-        )
-        shap_folds_rf, shap_sum_rf = run_shap_over_splits(
-            X_df=X, y=y,
-            n_splits=CONFIG["shap"]["n_splits"],
-            test_size=CONFIG["shap"]["test_size"],
-            embargo=CONFIG["shap"]["embargo"],
-            min_train_size=CONFIG["shap"]["min_train_size"],
-            estimator=rf_final,
-            explainer_kind="tree",
-            agg=CONFIG["shap"]["agg"],
-            random_state=RANDOM_STATE,
-        )
-        imp_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_folds.csv"), index=False)
-        imp_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_summary.csv"), index=False)
-        shap_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_folds.csv"), index=False)
-        shap_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary.csv"), index=False)
-
-        # ==================== Ergebnisse sammeln ===============================
+        # ==================== Ergebnisse sammeln für 70/30 Split===============================
         results[pseudonym] = {
             "r2_elastic": r2_elastic,
             "mae_elastic": mae_elastic,
@@ -706,12 +795,185 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rmssd_phq2": rmssd_phq2,
             "en_best_alpha": best_alpha,
             "en_best_l1_ratio": best_l1,
-            "rf_best_n_estimators": rf_params["n_estimators"],
-            "rf_best_max_depth": rf_params["max_depth"],
-            "rf_best_min_samples_leaf": rf_params["min_samples_leaf"],
+            "rf_best_n_estimators": model_rf.n_estimators,
+            "rf_best_max_depth": model_rf.max_depth,
+            "rf_best_min_samples_leaf": model_rf.min_samples_leaf,
         }
+
+        # ==================== Rolling PI & Rolling SHAP ========================
+        print("  [EN] Rolling PI/SHAP ...")
+
+        # final HP für EN aus GridSearch
+        # en_final = ElasticNet(alpha=best_alpha, l1_ratio=best_l1, max_iter=10000, random_state=RANDOM_STATE)
+        # imp_folds_en, imp_sum_en = run_feature_permutation_importance_over_splits(
+        #     X_df=X, y=y,
+        #     n_splits=CONFIG["pi"]["n_splits"],
+        #     test_size=CONFIG["pi"]["test_size"],
+        #     embargo=CONFIG["pi"]["embargo"],
+        #     min_train_size=CONFIG["pi"]["min_train_size"],
+        #     estimator=en_final,
+        #     n_repeats=CONFIG["pi"]["n_repeats"],
+        #     agg=CONFIG["pi"]["agg"],
+        #     random_state=RANDOM_STATE,
+        # )
+        # shap_folds_en, shap_sum_en = run_shap_over_splits(
+        #     X_df=X, y=y,
+        #     n_splits=CONFIG["shap"]["n_splits"],
+        #     test_size=CONFIG["shap"]["test_size"],
+        #     embargo=CONFIG["shap"]["embargo"],
+        #     min_train_size=CONFIG["shap"]["min_train_size"],
+        #     estimator=en_final,
+        #     explainer_kind="linear",
+        #     agg=CONFIG["shap"]["agg"],
+        #     random_state=RANDOM_STATE,
+        # )
+        # imp_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_folds.csv"), index=False)
+        # imp_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_summary.csv"), index=False)
+        # shap_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_folds.csv"), index=False)
+        # shap_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary.csv"), index=False)
+
+    
+        make_en = lambda: ElasticNet(alpha=best_alpha, 
+                                     l1_ratio=CONFIG["en"]["l1_ratio"], 
+                                     max_iter=CONFIG["en"]["max_iter"], 
+                                     tol=CONFIG["en"]["tol"],
+                                     random_state=RANDOM_STATE)
+
+        res_en = run_explain_over_splits(
+            X_df=X, y=y, 
+            make_model=make_en,
+            shap_kind="linear", 
+            compute_shap=True, 
+            compute_pi=True,
+            n_splits=CONFIG["shap"]["n_splits"], 
+            test_size=CONFIG["shap"]["test_size"], 
+            embargo=CONFIG["shap"]["embargo"], 
+            min_train_size=CONFIG["shap"]["min_train_size"],
+            n_repeats=CONFIG["pi"]["n_repeats"], 
+            random_state=RANDOM_STATE,
+        )
+
+        print("  [RF] Rolling PI/SHAP ...")
+        # final HP für RF aus GridSearch
+        # rf_params = {
+        #     "n_estimators": best_rf.get_params()["model__n_estimators"],
+        #     "max_depth": best_rf.get_params()["model__max_depth"],
+        #     "min_samples_leaf": best_rf.get_params()["model__min_samples_leaf"],
+        #     "random_state": RANDOM_STATE,
+        # }
+        # rf_final = RandomForestRegressor(**rf_params)
+
+        # imp_folds_rf, imp_sum_rf = run_feature_permutation_importance_over_splits(
+        #     X_df=X, y=y,
+        #     n_splits=CONFIG["pi"]["n_splits"],
+        #     test_size=CONFIG["pi"]["test_size"],
+        #     embargo=CONFIG["pi"]["embargo"],
+        #     min_train_size=CONFIG["pi"]["min_train_size"],
+        #     estimator=rf_final,
+        #     n_repeats=CONFIG["pi"]["n_repeats"],
+        #     agg=CONFIG["pi"]["agg"],
+        #     random_state=RANDOM_STATE,
+        # )
+        # shap_folds_rf, shap_sum_rf = run_shap_over_splits(
+        #     X_df=X, y=y,
+        #     n_splits=CONFIG["shap"]["n_splits"],
+        #     test_size=CONFIG["shap"]["test_size"],
+        #     embargo=CONFIG["shap"]["embargo"],
+        #     min_train_size=CONFIG["shap"]["min_train_size"],
+        #     estimator=rf_final,
+        #     explainer_kind="tree",
+        #     agg=CONFIG["shap"]["agg"],
+        #     random_state=RANDOM_STATE,
+        # )
+        # imp_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_folds.csv"), index=False)
+        # imp_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_summary.csv"), index=False)
+        # shap_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_folds.csv"), index=False)
+        # shap_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary.csv"), index=False)
+
+        bp = best_rf.get_params()
+
+        def make_rf():
+            return RandomForestRegressor(
+                random_state=RANDOM_STATE,
+                **{k: bp[k] for k in ["n_estimators","max_depth","min_samples_leaf","max_features"] if k in bp}
+            )
         
-    # (optional) globale Schwellen/Flags etc. weglassen – Fokus auf Metriken & Importances
+        res_rf = run_explain_over_splits(
+            X_df=X, y=y, 
+            make_model=make_rf,
+            shap_kind="tree", 
+            compute_shap=True, 
+            compute_pi=True,
+            n_splits=CONFIG["shap"]["n_splits"], 
+            test_size=CONFIG["shap"]["test_size"], 
+            embargo=CONFIG["shap"]["embargo"], 
+            min_train_size=CONFIG["shap"]["min_train_size"],
+            n_repeats=CONFIG["pi"]["n_repeats"], 
+            random_state=RANDOM_STATE,
+        )
+        # ============== Ergebnisse speichern (EN/RF) ==============
+        save_explain_outputs(res_en, RESULTS_DIR, pseudonym, "EN")
+        save_explain_outputs(res_rf, RESULTS_DIR, pseudonym, "RF")
+
+        # ============== Zusammenfassungs-Plots (Top-K) ==============
+        # EN – SHAP/PI Bars
+        if res_en.get("shap_summary_df") is not None and not res_en["shap_summary_df"].empty:
+            plot_importance_bars(
+                res_en["shap_summary_df"], "mean_abs_shap",
+                title=f"{pseudonym} EN – SHAP (median über Folds)",
+                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary_bar.png"),
+                top_k=TOP_K
+            )
+        if res_en.get("pi_summary_df") is not None and not res_en["pi_summary_df"].empty:
+            plot_importance_bars(
+                res_en["pi_summary_df"], "delta_R2",
+                title=f"{pseudonym} EN – Permutation Importance ΔR² (median über Folds)",
+                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_pi_summary_bar.png"),
+                top_k=TOP_K
+            )
+
+        # RF – SHAP/PI Bars
+        if res_rf.get("shap_summary_df") is not None and not res_rf["shap_summary_df"].empty:
+            plot_importance_bars(
+                res_rf["shap_summary_df"], "mean_abs_shap",
+                title=f"{pseudonym} RF – SHAP (median über Folds)",
+                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary_bar.png"),
+                top_k=TOP_K
+            )
+        if res_rf.get("pi_summary_df") is not None and not res_rf["pi_summary_df"].empty:
+            plot_importance_bars(
+                res_rf["pi_summary_df"], "delta_R2",
+                title=f"{pseudonym} RF – Permutation Importance ΔR² (median über Folds)",
+                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_pi_summary_bar.png"),
+                top_k=TOP_K
+            )
+
+        # ============== Folds auf PHQ-2 Zeitreihe ==============
+        # timestamps passend zu X_df_valid / y_valid:
+        timestamps_valid = (df_participant
+                            .loc[df_participant[target_column].notna(), "timestamp_utc"]
+                            .reset_index(drop=True))
+
+        # EN-Folds
+        if res_en.get("fold_metrics_df") is not None and not res_en["fold_metrics_df"].empty:
+            plot_folds_on_timeseries(
+                timestamps=timestamps_valid,
+                y_values=y,
+                fold_metrics_df=res_en["fold_metrics_df"],
+                out_path=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_folds_timeseries.png"),
+                title=f"{pseudonym} – EN: Test-Fenster & Metriken"
+            )
+
+        # RF-Folds
+        if res_rf.get("fold_metrics_df") is not None and not res_rf["fold_metrics_df"].empty:
+            plot_folds_on_timeseries(
+                timestamps=timestamps_valid,
+                y_values=y,
+                fold_metrics_df=res_rf["fold_metrics_df"],
+                out_path=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_folds_timeseries.png"),
+                title=f"{pseudonym} – RF: Test-Fenster & Metriken"
+            )
+
     return results, plot_data
 
 # %% Run the pipeline ===========================================================

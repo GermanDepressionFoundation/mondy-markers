@@ -615,3 +615,51 @@ def plot_timeseries_with_folds(
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close(fig)
+
+    # >>> NEW: Balkenplots für Summaries (SHAP/PI)
+def plot_importance_bars(summary_df: pd.DataFrame, value_col: str, title: str, outpath: str, top_k: int = 15):
+    if summary_df is None or summary_df.empty:
+        return
+    dfp = summary_df.sort_values(value_col, ascending=False).head(top_k)
+    plt.figure(figsize=(8, max(3, 0.35*len(dfp))))
+    plt.barh(dfp["feature"][::-1], dfp[value_col][::-1])
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=200)
+    plt.close()
+
+
+# >>> NEW: Folds auf Zeitreihe visualisieren (PHQ-2 + Testfenster + R2/MAE)
+def plot_folds_on_timeseries(
+    timestamps: pd.Series,
+    y_values: np.ndarray,
+    fold_metrics_df: pd.DataFrame,
+    out_path: str,
+    title: str = "Rolling test windows with metrics",
+):
+    if fold_metrics_df is None or fold_metrics_df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(timestamps, y_values, lw=1.5)
+    ax.set_title(title)
+    ax.set_xlabel("Zeit")
+    ax.set_ylabel("PHQ-2")
+
+    ymin, ymax = np.nanmin(y_values), np.nanmax(y_values)
+    yr = ymax - ymin if np.isfinite(ymin) and np.isfinite(ymax) else 1.0
+    label_y = ymax + 0.05 * yr  # Beschriftung oberhalb
+
+    for _, row in fold_metrics_df.iterrows():
+        ts = int(row["test_start_idx"])
+        te = int(row["test_end_idx"])
+        if ts >= len(timestamps) or te >= len(timestamps):
+            continue
+        ax.axvspan(timestamps.iloc[ts], timestamps.iloc[te], color="orange", alpha=0.18)
+        xm = timestamps.iloc[(ts + te) // 2]
+        ax.text(xm, label_y, f'R²={row["r2"]:.2f}, MAE={row["mae"]:.2f}',
+                ha="center", va="bottom", fontsize=9, rotation=0)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()

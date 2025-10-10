@@ -287,8 +287,8 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
             len(d["timestamps"]),
             len(d["phq2_raw"]),
             len(d[model_key]["pred"]),
-            len(d[model_key]["lower"]),
-            len(d[model_key]["upper"]),
+            #len(d[model_key]["lower"]),
+            #len(d[model_key]["upper"]),
             len(d["train_mask"]),
         )
 
@@ -297,8 +297,8 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                "lower": d[model_key]["lower"][:n],
-                "upper": d[model_key]["upper"][:n],
+                #"lower": d[model_key]["lower"][:n],
+                #"upper": d[model_key]["upper"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
             }
         ).sort_values("ts")
@@ -358,15 +358,15 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
             lw=1.6,
         )
 
-        # Fehlerband
-        plt.fill_between(
-            df["ts"],
-            df["lower"],
-            df["upper"],
-            color=pred_color,
-            alpha=0.25,
-            label="95 %-PI",
-        )
+        # # Fehlerband
+        # plt.fill_between(
+        #     df["ts"],
+        #     df["lower"],
+        #     df["upper"],
+        #     color=pred_color,
+        #     alpha=0.25,
+        #     label="95 %-PI",
+        # )
 
         # Fixed Y-axis range
         plt.ylim(0, 21)
@@ -410,8 +410,8 @@ def plot_phq2_test_errors_from_results(
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                "lower": d[model_key]["lower"][:n],
-                "upper": d[model_key]["upper"][:n],
+                #"lower": d[model_key]["lower"][:n],
+                #"upper": d[model_key]["upper"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
             }
         ).sort_values("ts")

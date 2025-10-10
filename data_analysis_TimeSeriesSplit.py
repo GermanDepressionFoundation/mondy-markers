@@ -40,20 +40,28 @@ CONFIG = {
     },
 
     # 70:30 chronologischer Holdout
-    "holdout_test_frac": 0.30,
+    "holdout_test_frac": 0.70,
+
+    # Anteil Startfenster für HP-Tuning und Fix-Scaler-Fit
+    "init_frac_for_hp": 0.30, 
 
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
 
+    # globalen Scaler einmal im Startfenster fitten?
+    "use_fixed_scaler": True,
+
     # Elastic Net 
     "en": {
         "scoring": "r2", # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
+        "tune_l1_ratio": False,  # True: l1_ratio in [0.1, 0.5, 0.9] mit-tunen
         "l1_ratio": 0.5, 
         "max_iter": 50000,
         "tol": 1e-2, 
         "param_grid": {
             "model__alpha": list(np.logspace(-3, 2, 12)), # 0.000001 bis 10 weniger schrumpfen
-        }
+        }, 
+        "en_l1_grid": [0.0, 0.1, 0.3, 0.5],
     },
 
     # Random Forest 
@@ -73,7 +81,8 @@ CONFIG = {
         "min_train_size": 90,
         "embargo": 0,
         "n_repeats": 10, # 10 nunr für smoke test (sonst 50)
-        "agg": "mean"  # "mean" oder "median"
+        "agg": "mean",  # "mean" oder "median"
+        "block_len": 7  # Länge der Blöcke für blockweise Permutation
     },
 
     # Rolling SHAP (gleiche Fenster wie PI)
@@ -85,6 +94,7 @@ CONFIG = {
         "agg": "mean"  # "mean" oder "median"
     },
 }
+
 
 # Ordner und Cachepfad
 os.makedirs(CONFIG["paths"]["results_dir"], exist_ok=True)
@@ -113,6 +123,38 @@ NIGHT_FEATURES = feature_config[feature_config["night"] == 1]["feature"].tolist(
 ACR_FEATURES = feature_config[feature_config["acr"] == 1]["feature"].tolist()
 
 FEATURES_TO_CONSIDER = BASELINE_FEATURES + DAY_FEATURES + NIGHT_FEATURES + ACR_FEATURES
+
+
+# Groups für gruppenweise Permutation Importance (auf Quellenebene über "category")
+def _feats(cats):
+    return feature_config[feature_config["category"].isin(cats)]["feature"].tolist()
+
+# Gruppen (ohne Day/Night)
+COARSE_GROUPS = {
+    "HRV":  _feats(["HRV"]),
+    "ACR":  _feats(["steps", "ACR"]),          # Aktivität/Transitions
+    "COMM": _feats(["app usage", "calls"]),    # Kommunikation / App-Use
+    "AUDIO":_feats(["audio"]),                 # Sprach-/Stimm-Proxys
+    "SLEEP":_feats(["sleep"]),
+    "CAL":  _feats(["time"]),                  # Kalender/Trend
+}
+
+# Day/Night-Variante für Quellen
+DAY_NIGHT_GROUPS = {}
+for name, cats in {
+    "HRV":  ["HRV"],
+    "ACR":  ["steps", "ACR"],
+    "COMM": ["app usage", "calls"],
+    "SLEEP":["sleep"],
+}.items():
+    for period in ["day", "night"]:
+        mask = feature_config["category"].isin(cats) & (feature_config[period] == 1)
+        DAY_NIGHT_GROUPS[f"{name}_{period}"] = feature_config.loc[mask, "feature"].tolist()
+
+#leere Gruppen entfernen
+DAY_NIGHT_GROUPS = {k: v for k, v in DAY_NIGHT_GROUPS.items() if v}
+
+CONFIG["feature_groups"] = COARSE_GROUPS
 
 # ============ Feature-spezifische Scaler ======================================
 class Log1pScaler(BaseEstimator, TransformerMixin):
@@ -249,6 +291,90 @@ def rolling_origin_splits(
         if len(tr_idx) >= min_train_size and len(te_idx) >= 5:
             splits.append((tr_idx, te_idx))
     return splits
+
+def preprocess_train_only():
+    """
+    Preprocessing-Schritte, die pro Fold auf dem Trainingsfenster gefittet werden.
+
+    Enthält alle Schritte, die drift-/missingness-sensitiv sind (z. B. MICE-Imputation,
+    per-Feature-Transformationen je Quelle). Diese werden in jedem Fold auf dem
+    Trainingsblock gefittet und dann auf Train/Test angewandt – leakage-sicher.
+
+    Returns
+    -------
+    sklearn.Pipeline
+        Pipeline ohne den globalen, fixen StandardScaler.
+
+    Notes
+    -----
+    - Der globale, fixe Scaler (falls genutzt) wird separat bereitgestellt.
+    - So bleiben β/SHAP mit fixem Scaler über Zeit vergleichbar, während
+      Imputation & per-Feature-Skalierung weiterhin train-only bleiben.
+    """
+    # Beispiel: baue hier deine bisherigen Steps OHNE finalen globalen StandardScaler
+    # (Passe an deine realen Step-Namen/Objekte an!)
+    return Pipeline([
+        ("imputer_mice", IterativeImputer(max_iter=50, tol=1e-2, random_state=CONFIG["random_state"])),
+        ("simple_imputer", SimpleImputer(strategy="mean")),
+        ("per_feature_scalers", pre_scalers),  # dein bestehender ColumnTransformer je Quelle
+        # KEIN globaler StandardScaler hier!
+    ])
+
+def fit_fixed_global_scaler(X_init: pd.DataFrame):
+    """
+    Fit eines *globalen* StandardScalers auf dem Startfenster.
+
+    Dieser Scaler wird danach NICHT mehr refittet, sondern in allen Folds
+    nur noch auf Train/Test angewandt. Damit werden Feature-Skalen über Zeit
+    konsistent und β/SHAP vergleichbar.
+
+    Parameters
+    ----------
+    X_init : pandas.DataFrame
+        Featurematrix des Startfensters (nach train-only Preprocessing).
+
+    Returns
+    -------
+    sklearn.preprocessing.StandardScaler
+        Gefitteter StandardScaler (global, fix).
+
+    Notes
+    -----
+    - Leakage-sicher, da nur auf *frühen* Daten gefittet.
+    - In späteren Folds wird *zuerst* train-only Preprocessing angewandt,
+      *dann* dieser feste Scaler transformiert.
+    """
+    scaler = StandardScaler()
+    scaler.fit(X_init)
+    return scaler
+
+def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> int:
+    """
+    Bestimmt das Ende des Startfensters für HP-Tuning & Fix-Scaler-Fit.
+
+    Nimmt den größeren der beiden Werte: floor(frac * n_samples) und min_train_size,
+    damit das Startfenster groß genug für stabiles Tuning/Scaling ist.
+
+    Parameters
+    ----------
+    n_samples : int
+        Anzahl der Zeilen (Tage).
+    frac : float
+        Anteil (z. B. 0.30 für 30 %).
+    min_train_size : int
+        Untergrenze in Tagen.
+
+    Returns
+    -------
+    int
+        Exklusiver Endindex (Python-Slicing) des Startfensters.
+
+    Notes
+    -----
+    - Typischerweise 30 % oder min_train_size, was immer größer ist.
+    """
+    import math
+    return max(int(math.floor(frac * n_samples)), int(min_train_size))
 
 # %%  PERMUTATION-IMPORTANCE (modell-agnostisch) =========================
 def permutation_importance_per_feature(
@@ -460,6 +586,216 @@ def evaluate_over_splits(
 
     return pd.DataFrame(rows)
 
+def permutation_importance_by_group(
+    fitted_estimator, X_test, y_test, groups: Dict[str, list],
+    n_repeats=50, block_len=7, random_state=42
+):
+    """
+    Blockierte, gruppenweise Permutation Importance für Zeitreihen.
+
+    Im Gegensatz zur featureweisen Permutation werden hier **alle Features einer Quelle/Gruppe
+    gleichzeitig** permutiert – und zwar **blockweise** (z. B. 7-Tage-Blöcke). Dadurch bleiben
+    kurzfristige Dynamiken (Autokorrelation, Wochenrhythmik) erhalten, während die **zeitliche
+    Ausrichtung** der gesamten Gruppe relativ zum Ziel y gezielt zerstört wird.
+    Das liefert eine realistischere Nullhypothese für Zeitreihen und ergibt direkt
+    die Importanz **auf Quellen-/Gruppenebene** (HRV, Bewegung, Sprache, …).
+
+    Parameters
+    ----------
+    fitted_estimator : sklearn estimator (oder Pipeline)
+        Bereits **auf dem Trainingssplit** gefittetes Modell mit `.predict(X)`-Methode.
+        (Typisch: eure Pipeline aus Preprocessing + ElasticNet.)
+    X_test : pandas.DataFrame
+        Test-Featurematrix (chronologisch sortiert). Muss Spaltennamen tragen, die in `groups` vorkommen können.
+    y_test : array-like
+        Zielwerte für den Testsatz (gleiche Länge wie X_test).
+    groups : dict[str, list[str]]
+        Mapping {gruppenname: [feature_spaltennamen, ...]}.
+        Nicht vorhandene Spalten werden still ignoriert (z. B. wenn ein Feature in diesem Fold gefiltert wurde).
+    n_repeats : int, default=50
+        Anzahl Wiederholungen pro Gruppe für die Monte-Carlo-Schätzung der Importanz.
+    block_len : int, default=7
+        Länge der Zeitblöcke für die Block-Permutation (z. B. 7 für Wochenrhythmik
+        oder die erste Lag-Länge, bei der die ACF ~ 0 ist).
+    random_state : int | None, default=42
+        Seed für Reproduzierbarkeit (numpy Generator).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Tabelle mit einer Zeile pro Gruppe und folgenden Spalten:
+        - 'group'            : Name der Quelle/Gruppe
+        - 'delta_R2_mean'    : mittlerer Abfall in R² (baseline_R2 - R2_perm) über n_repeats
+        - 'delta_R2_std'     : Standardabweichung des R²-Abfalls
+        - 'delta_MAE_mean'   : mittlere Zunahme in MAE (MAE_perm - baseline_MAE)
+        - 'delta_MAE_std'    : Standardabweichung der MAE-Differenz
+        - 'n_repeats'        : Anzahl Wiederholungen
+        - 'block_len'        : verwendete Blocklänge
+
+    Notes
+    -----
+    - **Warum gruppenweise?** Viele eurer Features innerhalb einer Quelle sind korreliert.
+      Permutiert man nur ein einzelnes Feature, kann die Quelle weiterhin über korrelierte
+      Geschwisterinformationen wirken. Die gruppierte Permutation testet den *gemeinsamen*
+      Beitrag der Quelle.
+    - **Warum blockweise?** i.i.d.-Permutation zerstört Autokorrelation/Seasonality
+      und überschätzt Importanz. Block-Permutation hält kurzfristige Dynamik intakt
+      und prüft die richtige Nullhypothese „Quelle vorhanden, aber zeitlich falsch ausgerichtet“.
+    - **Skalierung:** Die Funktion setzt voraus, dass `fitted_estimator` alle nötigen
+      Preprocessing-Schritte enthält (z. B. Scaler in Pipeline). X_test muss bereits im
+      Testraum vorliegen (d. h. dieselbe Spaltenordnung/ -namen wie im Fit).
+    - **Relativierung auf 100 %:** Für 100 %-Plots pro Fold (Quellenanteile) normalisiere die
+      resultierenden delta-R² je Fold auf Summe = 1, bevor man über Folds/Probanden mittelt.
+
+    Examples
+    --------
+    >>> groups = {
+    ...     "HRV": ["HRV_ULF", "HRV_SDNN"],
+    ...     "ACC": ["steps", "wake intensity gradient"],
+    ...     "DailyDialog": ["F0semitoneFrom27", "jitterLocal_sma3nz_amean"]
+    ... }
+    >>> df_pi_g = permutation_importance_by_group(model, X_test, y_test, groups,
+    ...                                           n_repeats=50, block_len=7, random_state=42)
+    >>> df_pi_g.sort_values("delta_R2_mean", ascending=False).head()
+
+    """
+    rng = np.random.default_rng(random_state)
+    y_base = fitted_estimator.predict(X_test)
+    R2_base = r2_score(y_test, y_base)
+    MAE_base = mean_absolute_error(y_test, y_base)
+
+    rows = []
+    for gname, gcols in groups.items():
+        col_idx = [X_test.columns.get_loc(c) for c in gcols if c in X_test.columns]
+        if not col_idx: 
+            continue
+        dR2_list, dMAE_list = [], []
+        for _ in range(n_repeats):
+            Xp = X_test.copy()
+            # alle Spalten der Gruppe gemeinsam block-permutieren (gleicher Blockorder)
+            n = len(Xp)
+            blocks = [np.arange(i, min(i+block_len, n)) for i in range(0, n, block_len)]
+            order = rng.permutation(len(blocks))
+            new_idx = np.concatenate([blocks[i] for i in order])
+            for j in col_idx:
+                Xp.iloc[:, j] = Xp.iloc[new_idx, j].to_numpy()
+
+            y_hat = fitted_estimator.predict(Xp)
+            dR2_list.append(R2_base - r2_score(y_test, y_hat))
+            dMAE_list.append(mean_absolute_error(y_test, y_hat) - MAE_base)
+        rows.append({"group": gname, "delta_R2": np.mean(dR2_list), "delta_MAE": np.mean(dMAE_list)})
+    return pd.DataFrame(rows).sort_values("delta_R2", ascending=False).reset_index(drop=True)
+
+
+def _block_permute_col(X_df, col_idx, block_len, rng):
+    """
+    Blockweise Permutation einer Spalte in zeitlich geordneten Testdaten.
+
+    Diese Funktion permutiert eine einzelne Feature-Spalte nicht punktweise (i.i.d.),
+    sondern in zusammenhängenden Zeitblöcken fester Länge. Dadurch bleiben
+    innerhalb eines Blocks kurzfristige Dynamik (Autokorrelation, Wochenrhythmik)
+    erhalten, während die zeitliche Ausrichtung der Blöcke relativ zum Ziel y
+    gezielt zerstört wird. Das ist für Zeitreihen-Permutation-Importance die
+    realistischere Nullhypothese („Feature vorhanden, aber falsch ausgerichtet“).
+
+    Parameters
+    ----------
+    X_df : pandas.DataFrame
+        Feature-Matrix des (chronologisch sortierten) Test-Splits.
+        Jede Zeile entspricht typischerweise einem Tag.
+    col_idx : int
+        Spaltenindex (0-basiert) der zu permutierenden Feature-Spalte in X_df.
+        (Nutze X_df.columns.get_loc(name), wenn du einen Spaltennamen hast.)
+    block_len : int
+        Blocklänge (Anzahl aufeinanderfolgender Zeilen), die als Einheit
+        zusammen permutiert werden. Typische Wahl: 7 (Wochenrhythmus) oder
+        die erste Lag-Länge, bei der die ACF ~ 0 ist.
+    rng : numpy.random.Generator
+        Zufallsgenerator für reproduzierbare Permutation (z. B. np.random.default_rng(42)).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Kopie von X_df, in der genau die gewählte Spalte blockweise permutiert wurde.
+        Alle anderen Spalten bleiben unverändert.
+
+    Notes
+    -----
+    - Zu kleine Blocklängen nähern die i.i.d.-Permutation an und können die
+      Autokorrelation zu stark zerstören (Überschätzung der Importance).
+    - Zu große Blocklängen entkoppeln ggf. zu wenig (Unterschätzung).
+      Validiere 7/14 gegen die ACF deiner Reihe.
+    - Für korrelierte Features derselben Quelle (z. B. HRV-Cluster) sollten
+      alle betroffenen Spalten gemeinsam blockweise permutiert werden
+      (grouped permutation), um Quellstruktur zu erhalten.
+
+    Example
+    -------
+    import numpy as np, pandas as pd
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"a": range(10), "b": np.linspace(0, 1, 10)})
+    X_perm = _block_permute_col(X, col_idx=0, block_len=4, rng=rng)
+    len(X_perm) == len(X)
+    True
+    sorted(X_perm["a"].tolist()) == list(range(10))  # Werte erhalten, Reihenfolge verändert
+    True  
+    """
+    Xp = X_df.copy(deep=True)
+    n = len(Xp)
+    # Indizes in Blöcke partitionieren
+    blocks = [np.arange(i, min(i+block_len, n)) for i in range(0, n, block_len)]
+    order = rng.permutation(len(blocks))
+    new_idx = np.concatenate([blocks[i] for i in order])
+    Xp.iloc[:, col_idx] = Xp.iloc[new_idx, col_idx].to_numpy()
+    return Xp
+
+def _fold_normalize(
+    df: pd.DataFrame,
+    fold_col: str,
+    value_col: str,
+    rel_col: str = "rel_value"
+) -> pd.DataFrame:
+    """
+    Normiert Importanzwerte pro Fold so, dass die Summe je Fold = 1 ist.
+
+    Für 100%-Darstellungen und robuste Aggregation über Folds werden die innerhalb
+    eines Folds berechneten Importanzen (z. B. mean_abs_shap oder delta_R2) auf die
+    fold-spezifische Gesamtsumme skaliert. Dadurch sind Features/Quellen zwischen
+    Folds vergleichbar; anschließende Median-/IQR-Aggregation reflektiert stabile
+    relative Bedeutung statt absoluter Skalenartefakte.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Tabelle mit mindestens den Spalten (fold_col, value_col).
+    fold_col : str
+        Spaltenname des Fold-Identifiers (z. B. "fold").
+    value_col : str
+        Spaltenname des zu normierenden Werts (z. B. "mean_abs_shap" oder "delta_R2").
+    rel_col : str, optional
+        Name der neuen Spalte für den relativen, auf 1 normierten Wert.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Kopie von df mit zusätzlich der Spalte `rel_col`.
+
+    Notes
+    -----
+    - Falls die Fold-Summe 0 ist, wird der relative Wert auf 0 gesetzt.
+    - Für Gruppen-PI kann delta_R2 bevorzugt normiert werden (Interpretation als
+      erklärter Varianzbeitrag); analog ist eine MAE-Normierung möglich.
+
+    Example
+    -------
+    >>> shap_folds_df = _fold_normalize(shap_folds_df, "fold", "mean_abs_shap", "rel_mean_abs_shap")
+    >>> pi_folds_df   = _fold_normalize(pi_folds_df, "fold", "delta_R2",      "rel_delta_R2")
+    """
+    out = df.copy()
+    sums = out.groupby(fold_col)[value_col].transform("sum").replace(0, np.nan)
+    out[rel_col] = (out[value_col] / sums).fillna(0.0)
+    return out
+
 def run_explain_over_splits(
     X_df: pd.DataFrame,
     y: np.ndarray,
@@ -475,13 +811,78 @@ def run_explain_over_splits(
     random_state: int = 42,
 ):
     """
-    Expanding-Rolling über Zeit. Pro Fold:
-      - Preprocessing (fit auf Train) -> Modell fit
-      - Test-Metriken (R2/MAE)
-      - optional: SHAP auf Test (Background = Train)
-      - optional: Permutation Importance auf Test (ΔR2/ΔMAE)
-    Rückgabe: dict mit DataFrames.
+    Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
+    SHAP-Analyse und (blockierter) Permutation Importance auf dem Testfenster.
+
+    Für eine chronologisch sortierte Tagesreihe erzeugt die Funktion Rolling-Origin-Splits
+    (Expanding per Default), trainiert je Fold eine Preprocessing+Modell-Pipeline auf dem
+    Trainingsfenster, evaluiert auf dem Testfenster (R²/MAE) und berechnet optional
+    SHAP-Attributionen sowie blockierte Permutation Importances. Zusätzlich kann eine
+    gruppenweise PI (z. B. HRV/ACT/COMM/SLEEP) berechnet werden, um Quellen-Anteile
+    direkt zu erhalten (für 100%-Plots und statistische Tests).
+
+    Parameters
+    ----------
+    X_df : pandas.DataFrame
+        Chronologisch sortierte Feature-Matrix (Zeilen = Tage).
+    y : np.ndarray
+        Zielvektor gleicher Länge wie X_df.
+    make_model : callable
+        Fabrikfunktion, die einen **ungefitten** Estimator/Pipeline zurückgibt (z. B. ElasticNet).
+    shap_kind : {"auto","linear","tree"}, optional
+        SHAP-Backend-Auswahl; "auto" versucht kompatible Explainer zu wählen.
+    compute_shap : bool, optional
+        Ob pro Fold SHAP-Werte auf dem Testfenster berechnet werden.
+    compute_pi : bool, optional
+        Ob pro Fold Permutation Importances berechnet werden (Feature-weise + Gruppen-weise).
+    n_splits : int, optional
+        Anzahl Rolling-Origin-Folds.
+    test_size : int, optional
+        Länge des Testfensters je Fold (in Tagen).
+    embargo : int, optional
+        Sicherheitslücke zwischen Train-Ende und Test-Start (Tage), um Leakage zu vermeiden.
+    min_train_size : int, optional
+        Minimale Trainingsfensterlänge (in Tagen).
+    n_repeats : int, optional
+        Wiederholungen pro Feature/Gruppe für PI (Monte-Carlo-Schätzung).
+    random_state : int, optional
+        Seed für Reproduzierbarkeit (wird für Permutation verwendet).
+
+    Returns
+    -------
+    dict
+        {
+          "fold_metrics_df":  DataFrame mit R²/MAE je Fold,
+          "shap_folds_df":    DataFrame mit (fold, feature, mean_abs_shap, mean_signed_shap) oder None,
+          "shap_summary_df":  Median-aggregation über Folds oder None,
+          "pi_folds_df":      DataFrame mit (fold, feature, delta_R2, delta_MAE) oder None,
+          "pi_summary_df":    Median-aggregation über Folds oder None,
+          "pi_groups_folds_df":   DataFrame mit (fold, group, delta_R2_mean, delta_MAE_mean, rel_*) oder None,
+          "pi_groups_summary_df": Median-aggregation über Folds oder None,
+        }
+
+    Notes
+    -----
+    - Preprocessing wird **ausschließlich auf TRAIN** gefittet und auf TEST angewandt (leakage-sicher).
+    - Permutation erfolgt **blockweise** (CONFIG["pi"]["block_len"]), um Autokorrelation/Seasonality zu respektieren.
+    - Gruppen-PI erwartet CONFIG["feature_groups"] als Mapping {gruppe: [features]} (z. B. COARSE_GROUPS oder DAY_NIGHT_GROUPS).
+    - Für 100%-Plots: pro Fold die Gruppen-Importanzen relativieren (Summe = 1), dann über Folds/Personen mitteln (Median + IQR).
+    - SHAP/PI werden für 100%-Darstellungen fold-normalisiert (Summe je Fold = 1):
+        SHAP: rel_mean_abs_shap; PI: rel_delta_R2. 
+        Die Summary-Tabellen basieren auf Medianen dieser relativen Werte, was robuste, vergleichbare Aggregation
+        über Folds (und später über Personen) erlaubt.
+
+    Example
+    -------
+    >>> CONFIG["pi"] = {"block_len": 7, "n_repeats": 50}
+    >>> CONFIG["feature_groups"] = COARSE_GROUPS   # oder DAY_NIGHT_GROUPS
+    >>> res = run_explain_over_splits(
+    ...     X_df, y, make_model=make_en_pipeline, compute_shap=True, compute_pi=True,
+    ...     n_splits=5, test_size=14, min_train_size=90, random_state=42
+    ... )
+    >>> res["pi_groups_summary_df"].head()
     """
+
     splits = rolling_origin_splits(
         n_samples=len(y),
         n_splits=n_splits,
@@ -494,6 +895,7 @@ def run_explain_over_splits(
     fold_rows = []
     shap_rows = []
     pi_rows = []
+    pi_group_rows = []
 
     for fold_id, (tr, te) in enumerate(splits, start=1):
         # --- Preprocessing nur auf TRAIN fitten (keine Leckage)
@@ -549,7 +951,7 @@ def run_explain_over_splits(
                     "mean_signed_shap": float(s),
                 })
 
-        # --- Permutation Importance – auf Testfenster
+        # --- Permutation Importance – auf Testfenster pro Block pro Feture
         if compute_pi:
             cols = list(Xt_te.columns)
             # Baseline für deltas
@@ -559,9 +961,7 @@ def run_explain_over_splits(
             for j, col in enumerate(cols):
                 dR2_list, dMAE_list = [], []
                 for _ in range(n_repeats):
-                    Xp = Xt_te.copy(deep=True)                # DataFrame behalten (Namen!)
-                    perm = rng.permutation(len(Xp))
-                    Xp.iloc[:, j] = Xp.iloc[perm, j].to_numpy()
+                    Xp = _block_permute_col(Xt_te, j, block_len=CONFIG["pi"]["block_len"], rng=rng) 
                     y_hat_p = model.predict(Xp)
                     dR2_list.append(R2_base - r2_score(y[te], y_hat_p))
                     dMAE_list.append(mean_absolute_error(y[te], y_hat_p) - MAE_base)
@@ -571,7 +971,34 @@ def run_explain_over_splits(
                     "delta_R2": float(np.mean(dR2_list)),
                     "delta_MAE": float(np.mean(dMAE_list)),
                 })
+        # --- Gruppenweise Permutation Importance (blockweise)
+      
+        df_pi_groups = permutation_importance_by_group(
+            fitted_estimator=model,
+            X_test=Xt_te,
+            y_test=y[te],
+            groups= CONFIG["feature_groups"], # TODO: into fun args?
+            n_repeats=CONFIG["pi"]["n_repeats"],
+            block_len=CONFIG["pi"]["block_len"],
+            random_state=CONFIG["random_state"],
+        )
 
+        # Relativierung auf 100 % (delta_R2)
+        total = df_pi_groups["delta_R2"].sum()
+        if total > 0:
+            df_pi_groups["rel_delta_R2"] = df_pi_groups["delta_R2"] / total
+        else:
+            df_pi_groups["rel_delta_R2"] = 0.0
+
+        # (delta_MAE)
+        total = df_pi_groups["delta_MAE"].sum()
+        if total > 0:
+            df_pi_groups["rel_delta_MAE"] = df_pi_groups["delta_MAE"] / total
+        else:
+            df_pi_groups["rel_delta_MAE"] = 0.0
+        pi_group_rows.extend(df_pi_groups.to_dict(orient="records"))
+
+    # Ergebnisse zusammenfassen
     fold_metrics_df = pd.DataFrame(fold_rows)
 
     shap_folds_df = pd.DataFrame(shap_rows) if compute_shap else None
@@ -579,10 +1006,51 @@ def run_explain_over_splits(
                        .median().sort_values("mean_abs_shap", ascending=False).reset_index()
                        ) if compute_shap and not shap_folds_df.empty else None
 
+    if compute_shap and shap_folds_df is not None and not shap_folds_df.empty:
+        shap_folds_df = _fold_normalize(
+            shap_folds_df, fold_col="fold", value_col="mean_abs_shap", rel_col="rel_mean_abs_shap"
+        )
+        shap_summary_df = (
+            shap_folds_df.groupby("feature")[["rel_mean_abs_shap", "mean_signed_shap"]]
+            .median()
+            .sort_values("rel_mean_abs_shap", ascending=False)
+            .reset_index()
+        )
+    else:
+        shap_summary_df = None
+
     pi_folds_df = pd.DataFrame(pi_rows) if compute_pi else None
     pi_summary_df = (pi_folds_df.groupby("feature")[["delta_R2","delta_MAE"]]
                      .median().sort_values("delta_R2", ascending=False).reset_index()
                      ) if compute_pi and not pi_folds_df.empty else None
+    
+    if compute_pi and pi_folds_df is not None and not pi_folds_df.empty:
+        pi_folds_df = _fold_normalize(
+            pi_folds_df, fold_col="fold", value_col="delta_R2", rel_col="rel_delta_R2"
+        )
+        pi_summary_df = (
+            pi_folds_df.groupby("feature")[["rel_delta_R2", "delta_MAE"]]
+            .median()
+            .sort_values("rel_delta_R2", ascending=False)
+            .reset_index()
+        )
+    else:
+        pi_summary_df = None
+
+    pi_groups_folds_df = pd.DataFrame(pi_group_rows) if compute_pi else None
+    pi_groups_summary_df = (pi_groups_folds_df.groupby("group")[["delta_R2","delta_MAE","rel_delta_R2"]]
+                            .median().sort_values("delta_R2", ascending=False).reset_index()
+                            ) if compute_pi and pi_groups_folds_df is not None and not pi_groups_folds_df.empty else None
+    
+    if compute_pi and pi_groups_folds_df is not None and not pi_groups_folds_df.empty:
+        pi_groups_summary_df = (
+            pi_groups_folds_df.groupby("group")[["rel_delta_R2", "delta_R2", "delta_MAE"]]
+            .median()
+            .sort_values("rel_delta_R2", ascending=False)
+            .reset_index()
+        )
+    else:
+        pi_groups_summary_df = None
 
     return {
         "fold_metrics_df": fold_metrics_df,
@@ -590,6 +1058,8 @@ def run_explain_over_splits(
         "shap_summary_df": shap_summary_df,
         "pi_folds_df": pi_folds_df,
         "pi_summary_df": pi_summary_df,
+        "pi_groups_folds_df": pi_groups_folds_df,
+        "pi_groups_summary_df": pi_groups_summary_df, 
     }
 
 # Save-Helper für die Ergebnisse aus run_explain_over_splits
@@ -617,13 +1087,19 @@ def save_explain_outputs(res_dict: dict, results_dir: str, pseudonym: str, model
     if ps is not None and not ps.empty:
         ps.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_summary.csv"), index=False)
 
+    # Grouped Permutation Importance
+    pgf = res_dict.get("pi_groups_folds_df", None)
+    pgs = res_dict.get("pi_groups_summary_df", None)
+    if pgf is not None and not pgf.empty:
+        pgf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_group_folds.csv"), index=False)
+    if pgs is not None and not pgs.empty:
+        pgs.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_group_summary.csv"), index=False)
 
-
-# %% Main Processing Function ===================================================
 def days_since_start(group):
     start_date = group["timestamp_utc"].min()
     return (group["timestamp_utc"] - start_date).dt.days
 
+# %% Main Processing Function ===================================================
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
@@ -703,7 +1179,6 @@ def process_participants(df_raw, pseudonyms, target_column):
         ])
         en_pipe.fit(X_train_df, y_train)
         best_en = en_pipe  # enthält bereits das beste Alpha im Schritt "model"
-
 
         # Holdout-Performance (Prospektiv)
         y_pred_en = best_en.predict(X_test_df)
@@ -850,7 +1325,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             embargo=CONFIG["shap"]["embargo"], 
             min_train_size=CONFIG["shap"]["min_train_size"],
             n_repeats=CONFIG["pi"]["n_repeats"], 
-            random_state=RANDOM_STATE,
+            random_state=CONFIG["random_state"],
         )
 
         print("  [RF] Rolling PI/SHAP ...")
@@ -909,7 +1384,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             embargo=CONFIG["shap"]["embargo"], 
             min_train_size=CONFIG["shap"]["min_train_size"],
             n_repeats=CONFIG["pi"]["n_repeats"], 
-            random_state=RANDOM_STATE,
+            random_state=CONFIG["random_state"],
         )
         # ============== Ergebnisse speichern (EN/RF) ==============
         save_explain_outputs(res_en, RESULTS_DIR, pseudonym, "EN")
@@ -919,14 +1394,14 @@ def process_participants(df_raw, pseudonyms, target_column):
         # EN – SHAP/PI Bars
         if res_en.get("shap_summary_df") is not None and not res_en["shap_summary_df"].empty:
             plot_importance_bars(
-                res_en["shap_summary_df"], "mean_abs_shap",
+                res_en["shap_summary_df"], "rel_mean_abs_shap",
                 title=f"{pseudonym} EN – SHAP (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary_bar.png"),
                 top_k=TOP_K
             )
         if res_en.get("pi_summary_df") is not None and not res_en["pi_summary_df"].empty:
             plot_importance_bars(
-                res_en["pi_summary_df"], "delta_R2",
+                res_en["pi_summary_df"], "rel_delta_R2",
                 title=f"{pseudonym} EN – Permutation Importance ΔR² (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_pi_summary_bar.png"),
                 top_k=TOP_K
@@ -935,14 +1410,14 @@ def process_participants(df_raw, pseudonyms, target_column):
         # RF – SHAP/PI Bars
         if res_rf.get("shap_summary_df") is not None and not res_rf["shap_summary_df"].empty:
             plot_importance_bars(
-                res_rf["shap_summary_df"], "mean_abs_shap",
+                res_rf["shap_summary_df"], "rel_mean_abs_shap",
                 title=f"{pseudonym} RF – SHAP (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary_bar.png"),
                 top_k=TOP_K
             )
         if res_rf.get("pi_summary_df") is not None and not res_rf["pi_summary_df"].empty:
             plot_importance_bars(
-                res_rf["pi_summary_df"], "delta_R2",
+                res_rf["pi_summary_df"], "rel_delta_R2",
                 title=f"{pseudonym} RF – Permutation Importance ΔR² (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_pi_summary_bar.png"),
                 top_k=TOP_K
@@ -997,6 +1472,7 @@ df_raw = df_raw.drop(columns=["patient_id"])
 target_column = PHQ2_COLUMN
 pseudonyms = df_raw["pseudonym"].unique()
 
+# %% Caching mechanism ===========================================================
 if os.path.exists(CACHE_RESULTS_PATH):
     print(f"[Info] Loading cached results from {CACHE_RESULTS_PATH} ...")
     cached_data = pd.read_pickle(CACHE_RESULTS_PATH)
@@ -1012,13 +1488,15 @@ plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="elastic")
 plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="rf")
 
 plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "elastic")
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic")
+plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic", show_pred_ci=False)
 plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic", show_pred_ci=False)
 
 plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "rf")
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf")
+plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf", show_pred_ci=False)
 plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf", show_pred_ci=False)
 
 # %% Save evaluation metrics (per participant) ==================================
 results_df = pd.DataFrame.from_dict(results, orient="index")
 results_df.to_csv(f"{RESULTS_DIR}/model_performance_summary.csv")
+
+# %%

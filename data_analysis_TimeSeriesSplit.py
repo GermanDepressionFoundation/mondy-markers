@@ -31,7 +31,7 @@ CONFIG = {
 
     "paths": {
         "data": "data/df_merged_v7.pickle",
-        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware",
+        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_test",
     },
 
     "targets": {
@@ -809,6 +809,7 @@ def run_explain_over_splits(
     min_train_size: int = 90,
     n_repeats: int = 50,
     random_state: int = 42,
+    fixed_scaler: StandardScaler | None = None,
 ):
     """
     Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
@@ -847,6 +848,11 @@ def run_explain_over_splits(
         Wiederholungen pro Feature/Gruppe für PI (Monte-Carlo-Schätzung).
     random_state : int, optional
         Seed für Reproduzierbarkeit (wird für Permutation verwendet).
+    fixed_scaler : StandardScaler | None, optional
+        Optionaler, bereits gefitteter globaler StandardScaler, der **in allen Folds
+        unverändert** auf Train/Test angewandt wird (für konsistente Feature-Skalen
+        und damit vergleichbare SHAP/PI über Folds). Falls None, wird kein fixer
+        Scaler genutzt (d. h. Preprocessing wird nur auf Train gefittet).
 
     Returns
     -------
@@ -898,10 +904,13 @@ def run_explain_over_splits(
     pi_group_rows = []
 
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        # --- Preprocessing nur auf TRAIN fitten (keine Leckage)
-        pp = preprocess_pipeline()
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])
+        pp = preprocess_train_only()                          # <<< statt preprocess_pipeline
+        Xt_tr = pp.fit_transform(X_df.iloc[tr])               # train-only fit
         Xt_te = pp.transform(X_df.iloc[te])
+
+        if fixed_scaler is not None:                          # <<< Fix-Scaler anwenden (nur transform)
+            Xt_tr = fixed_scaler.transform(Xt_tr)
+            Xt_te = fixed_scaler.transform(Xt_te)
 
         # --- Modell fitten
         model = make_model()
@@ -1130,8 +1139,8 @@ def process_participants(df_raw, pseudonyms, target_column):
             print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
             continue
 
-        # --- 70:30 HOLDOUT (chronologisch, kein Shuffle) ---
-        test_frac = CONFIG["holdout_test_frac"]
+        # --- Dummy Regressor ---
+        test_frac = CONFIG["init_frac_for_hp"]
         gap = 0
         split = int(round((1 - test_frac) * n))
         idx_train = np.arange(0, split - gap)
@@ -1142,59 +1151,69 @@ def process_participants(df_raw, pseudonyms, target_column):
         y_train = y[idx_train]
         y_test = y[idx_test]
 
-        print("var(y_train) =", float(np.var(y_train)))
-        print("var(y_test) =", float(np.var(y_test)))
+        print(f"{test_frac}:var(y_train) =", float(np.var(y_train)))
+        print(f"{1-test_frac}:var(y_test) =", float(np.var(y_test)))
         dum = DummyRegressor(strategy="mean").fit(X_train_df, y_train)
         print("baseline R2 =", r2_score(y_test, dum.predict(X_test_df)))
 
-        # =================== ELASTIC NET: GridSearch + SHAP ====================
-        print("  [EN] GridSearchCV (TimeSeriesSplit) ...")
+        # Startfenster, Fix-Scaler fitten & EN-Hyperparameter bestimmen
+        init_end = split_initial_window(n_samples=n,                          
+                                        frac=CONFIG["init_frac_for_hp"],
+                                        min_train_size=CONFIG["shap"]["min_train_size"])
 
-        ## Alternative 1: GridSearch mit ElasticNet (ohne CV im Modell)
-        # en_pipe = Pipeline([
-        #     ("pre", preprocess_pipeline()),
-        #     ("model", ElasticNet(max_iter=CONFIG["en"]["max_iter"],tol=CONFIG["en"]["tol"], l1_ratio=CONFIG["en"]["l1_ratio"], random_state=RANDOM_STATE)),
-        # ])
-        # en_gs = GridSearchCV(
-        #     estimator=en_pipe,
-        #     param_grid=CONFIG["en"]["param_grid"],
-        #     scoring=CONFIG["en"]["scoring"],
-        #     cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"]),
-        #     n_jobs=-1,
-        #     refit=True,
-        # )
-        # en_gs.fit(X_train_df, y_train)
-        # best_en: Pipeline = en_gs.best_estimator_
+        # Train-only Preprocessing (Imputation, per-Feature-Scaler) auf Startfenster
+        pp_train_only = preprocess_train_only()
+        X_init_tr = pp_train_only.fit_transform(X.iloc[:init_end])
 
-        en_pipe = Pipeline([
-            ("pre", preprocess_pipeline()),
-            ("model", ElasticNetCV(
-                l1_ratio=0.5,
-                alphas=np.logspace(-3, 2, 50),
-                cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"]),
-                max_iter=200_000,
-                tol=1e-2,
-                random_state=RANDOM_STATE,
-            )),
-        ])
-        en_pipe.fit(X_train_df, y_train)
-        best_en = en_pipe  # enthält bereits das beste Alpha im Schritt "model"
+        # Optional: globalen StandardScaler nur im Startfenster fitten und einfrieren
+        fixed_scaler = None
+        if CONFIG["use_fixed_scaler"]:
+            fixed_scaler = fit_fixed_global_scaler(X_init_tr)
+            X_init_for_cv = fixed_scaler.transform(X_init_tr)
+        else:
+            X_init_for_cv = X_init_tr
 
-        # Holdout-Performance (Prospektiv)
-        y_pred_en = best_en.predict(X_test_df)
+        en_cv = ElasticNetCV(
+            l1_ratio=CONFIG["en"]["l1_ratio"],
+            alphas=np.logspace(-3, 2, 50),
+            cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"]),
+            max_iter=200_000,
+            tol=1e-2,
+            random_state=RANDOM_STATE,
+        )
+        en_cv.fit(X_init_for_cv, y[:init_end])
+        best_alpha = float(en_cv.alpha_)
+        best_l1    = float(getattr(en_cv, "l1_ratio_", CONFIG["en"]["l1_ratio"]))
+        print(f"[Init-HP] EN alpha={best_alpha:.4g}, l1_ratio={best_l1}")
+
+
+        # =================== ELASTIC NET: (fixe HP aus Startfenster) + SHAP ====================
+        print("[EN] Fit mit fixen HP (aus Startfenster) ...")
+
+        # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
+        pp_en = preprocess_train_only()
+        Xt_train_en = pp_en.fit_transform(X_train_df)
+        Xt_test_en  = pp_en.transform(X_test_df)
+        if fixed_scaler is not None:
+            Xt_train_en = fixed_scaler.transform(Xt_train_en)
+            Xt_test_en  = fixed_scaler.transform(Xt_test_en)
+
+        # --- MODELL: ElasticNet mit fixen HP aus dem Startfenster
+        model_en = ElasticNet(
+            alpha=best_alpha,
+            l1_ratio=best_l1,
+            max_iter=CONFIG["en"]["max_iter"],
+            tol=CONFIG["en"]["tol"],
+            random_state=RANDOM_STATE,
+        )
+        model_en.fit(Xt_train_en, y_train)
+
+        # --- Holdout-Performance (Prospektiv)
+        y_pred_en = model_en.predict(Xt_test_en)
         r2_elastic = round(r2_score(y_test, y_pred_en), 2)
         mae_elastic = round(mean_absolute_error(y_test, y_pred_en), 1)
 
-        # ElasticNet-Modell extrahieren
-        model_en = best_en.named_steps["model"]
-        best_alpha = float(model_en.alpha_)
-        best_l1 = float(model_en.l1_ratio_)
-
-        # SHAP auf preprocessed Matrizen
-        pre_en = best_en.named_steps["pre"]
-        Xt_train_en = pre_en.transform(X_train_df)
-        Xt_test_en = pre_en.transform(X_test_df)
-        
+        # --- SHAP auf preprocessed Matrizen
         try:
             en_explainer = shap.LinearExplainer(model_en, Xt_train_en)
             en_shap_values = en_explainer.shap_values(Xt_test_en)
@@ -1207,45 +1226,66 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("EN # nonzero betas:", np.count_nonzero(model_en.coef_))
         print("mean(|SHAP|):", float(np.nanmean(np.abs(en_shap_values))))
 
-        en_feat_names = [str(c).split("__")[-1] for c in list(Xt_test_en.columns)]
+        # Feature-Namen (falls DataFrame-DesignMatrix)
+        en_feat_names = [str(c).split('__')[-1] for c in list(getattr(X_train_df, 'columns', []))] or [f"f{i}" for i in range(Xt_test_en.shape[1])]
         plot_shap_summary_and_bar(RESULTS_DIR, en_shap_values, Xt_test_en, en_feat_names, f"{pseudonym}_EN")
 
         # Modelle speichern
-        joblib.dump(best_en, os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"))
+        joblib.dump({"pre": pp_en, "scaler": fixed_scaler, "model": model_en},
+                    os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"))
 
-        # ================= RANDOM FOREST: GridSearch + SHAP ====================
-        print("  [RF] GridSearchCV (TimeSeriesSplit) ...")
-        rf_pipe = Pipeline([
-            ("pre", preprocess_pipeline()),
-            ("model", RandomForestRegressor(random_state=RANDOM_STATE)),
+        # ================= RANDOM FOREST: GridSearch NUR im Startfenster (+ fix) ====================
+        print("[RF] GridSearchCV (TimeSeriesSplit) NUR Startfenster ...")
+
+        rf_pre = preprocess_train_only()
+        X_rf_tr = rf_pre.fit_transform(X.iloc[:init_end])
+        if fixed_scaler is not None:
+            X_rf_tr = fixed_scaler.transform(X_rf_tr)
+
+        rf_search_est = Pipeline([
+            ("model", RandomForestRegressor(random_state=RANDOM_STATE))
         ])
         rf_gs = GridSearchCV(
-            estimator=rf_pipe,
+            estimator=rf_search_est,
             param_grid=CONFIG["rf"]["param_grid"],
             scoring=CONFIG["rf"]["scoring"],
             cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"]),
             n_jobs=-1,
             refit=True,
+            error_score="raise",
         )
-        rf_gs.fit(X_train_df, y_train)
-        best_rf: Pipeline = rf_gs.best_estimator_
+        rf_gs.fit(X_rf_tr, y[:init_end])
+        rf_best_params = rf_gs.best_params_
+        print("[Init-HP] RF best:", rf_best_params)
 
-        y_pred_rf = best_rf.predict(X_test_df)
+        rf_best_params_plain = {
+            k.split("__", 1)[1]: v for k, v in rf_best_params.items() if k.startswith("model__")
+        }
+        
+        rf_pre_fold = preprocess_train_only()
+        Xt_train_rf = rf_pre_fold.fit_transform(X_train_df)
+        Xt_test_rf  = rf_pre_fold.transform(X_test_df)
+        if fixed_scaler is not None:
+            Xt_train_rf = fixed_scaler.transform(Xt_train_rf)
+            Xt_test_rf  = fixed_scaler.transform(Xt_test_rf)
+
+        model_rf = RandomForestRegressor(random_state=RANDOM_STATE, **rf_best_params_plain)
+        model_rf.fit(Xt_train_rf, y_train)
+
+        y_pred_rf = model_rf.predict(Xt_test_rf)
         r2_rf = round(r2_score(y_test, y_pred_rf), 2)
         mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 1)
 
-        pre_rf = best_rf.named_steps["pre"]
-        Xt_test_rf = pre_rf.transform(X_test_df)
-        model_rf = best_rf.named_steps["model"]
         rf_explainer = shap.TreeExplainer(model_rf)
         rf_shap_values = rf_explainer.shap_values(Xt_test_rf)
-        rf_feat_names = [str(c).split("__")[-1] for c in list(Xt_test_rf.columns)]
+        rf_feat_names = [str(c).split("__")[-1] for c in list(getattr(X_train_df, 'columns', []))] or [f"f{i}" for i in range(Xt_test_rf.shape[1])]
         plot_shap_summary_and_bar(RESULTS_DIR, rf_shap_values, Xt_test_rf, rf_feat_names, f"{pseudonym}_RF")
 
         print(f"RF R2={r2_rf}, MAE={mae_rf}, n_estimators={model_rf.n_estimators}, max_depth={model_rf.max_depth}, min_samples_leaf={model_rf.min_samples_leaf}")
         print("mean(|SHAP|):", float(np.nanmean(np.abs(rf_shap_values))))
         # Modelle speichern
-        joblib.dump(best_rf, os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"))
+        joblib.dump({"pre": rf_pre_fold, "scaler": fixed_scaler, "model": model_rf},
+                    os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"))
 
         # ==================== Parity Plots & Zeitreihen-Plots ==================
         evaluate_and_plot_parity(RESULTS_DIR, y_test, y_pred_en, r2_elastic, mae_elastic, pseudonym, "elasticnet", "01")
@@ -1258,10 +1298,11 @@ def process_participants(df_raw, pseudonyms, target_column):
             "phq2_raw": y.tolist(),
             "train_mask": [i < split for i in range(n)],
             "test_mask": [i >= split for i in range(n)],
-            "elastic": {"pred": list(best_en.predict(X)), "lower": None, "upper": None},
-            "rf": {"pred": list(best_rf.predict(X)), "lower": None, "upper": None},
+            "elastic": {"pred": list(model_en.predict(fixed_scaler.transform(pp_en.transform(X)) if fixed_scaler else pp_en.transform(X))), "lower": None, "upper": None},
+            "rf": {"pred": list(model_rf.predict(fixed_scaler.transform(rf_pre_fold.transform(X)) if fixed_scaler else rf_pre_fold.transform(X))), "lower": None, "upper": None},
         }
-        # ==================== Ergebnisse sammeln für 70/30 Split===============================
+
+        # ==================== Ergebnisse sammeln für ini Fold===============================
         results[pseudonym] = {
             "r2_elastic": r2_elastic,
             "mae_elastic": mae_elastic,
@@ -1278,114 +1319,51 @@ def process_participants(df_raw, pseudonyms, target_column):
         # ==================== Rolling PI & Rolling SHAP ========================
         print("  [EN] Rolling PI/SHAP ...")
 
-        # final HP für EN aus GridSearch
-        # en_final = ElasticNet(alpha=best_alpha, l1_ratio=best_l1, max_iter=10000, random_state=RANDOM_STATE)
-        # imp_folds_en, imp_sum_en = run_feature_permutation_importance_over_splits(
-        #     X_df=X, y=y,
-        #     n_splits=CONFIG["pi"]["n_splits"],
-        #     test_size=CONFIG["pi"]["test_size"],
-        #     embargo=CONFIG["pi"]["embargo"],
-        #     min_train_size=CONFIG["pi"]["min_train_size"],
-        #     estimator=en_final,
-        #     n_repeats=CONFIG["pi"]["n_repeats"],
-        #     agg=CONFIG["pi"]["agg"],
-        #     random_state=RANDOM_STATE,
-        # )
-        # shap_folds_en, shap_sum_en = run_shap_over_splits(
-        #     X_df=X, y=y,
-        #     n_splits=CONFIG["shap"]["n_splits"],
-        #     test_size=CONFIG["shap"]["test_size"],
-        #     embargo=CONFIG["shap"]["embargo"],
-        #     min_train_size=CONFIG["shap"]["min_train_size"],
-        #     estimator=en_final,
-        #     explainer_kind="linear",
-        #     agg=CONFIG["shap"]["agg"],
-        #     random_state=RANDOM_STATE,
-        # )
-        # imp_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_folds.csv"), index=False)
-        # imp_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_perm_feat_summary.csv"), index=False)
-        # shap_folds_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_folds.csv"), index=False)
-        # shap_sum_en.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary.csv"), index=False)
-
-    
-        make_en = lambda: ElasticNet(alpha=best_alpha, 
-                                     l1_ratio=CONFIG["en"]["l1_ratio"], 
-                                     max_iter=CONFIG["en"]["max_iter"], 
-                                     tol=CONFIG["en"]["tol"],
-                                     random_state=RANDOM_STATE)
-
-        res_en = run_explain_over_splits(
-            X_df=X, y=y, 
-            make_model=make_en,
-            shap_kind="linear", 
-            compute_shap=True, 
-            compute_pi=True,
-            n_splits=CONFIG["shap"]["n_splits"], 
-            test_size=CONFIG["shap"]["test_size"], 
-            embargo=CONFIG["shap"]["embargo"], 
-            min_train_size=CONFIG["shap"]["min_train_size"],
-            n_repeats=CONFIG["pi"]["n_repeats"], 
-            random_state=CONFIG["random_state"],
+        make_en = lambda: ElasticNet(
+            alpha=best_alpha,
+            l1_ratio=best_l1,
+            max_iter=CONFIG["en"]["max_iter"],
+            tol=CONFIG["en"]["tol"],
+            random_state=RANDOM_STATE,
         )
 
+        res_en = run_explain_over_splits(
+            X_df=X, y=y,
+            make_model=make_en,
+            shap_kind="linear",
+            compute_shap=True, compute_pi=True,
+            n_splits=CONFIG["shap"]["n_splits"],
+            test_size=CONFIG["shap"]["test_size"],
+            embargo=CONFIG["shap"]["embargo"],
+            min_train_size=CONFIG["shap"]["min_train_size"],
+            n_repeats=CONFIG["pi"]["n_repeats"],
+            random_state=CONFIG["random_state"],
+            fixed_scaler=fixed_scaler,
+        )
+
+
         print("  [RF] Rolling PI/SHAP ...")
-        # final HP für RF aus GridSearch
-        # rf_params = {
-        #     "n_estimators": best_rf.get_params()["model__n_estimators"],
-        #     "max_depth": best_rf.get_params()["model__max_depth"],
-        #     "min_samples_leaf": best_rf.get_params()["model__min_samples_leaf"],
-        #     "random_state": RANDOM_STATE,
-        # }
-        # rf_final = RandomForestRegressor(**rf_params)
-
-        # imp_folds_rf, imp_sum_rf = run_feature_permutation_importance_over_splits(
-        #     X_df=X, y=y,
-        #     n_splits=CONFIG["pi"]["n_splits"],
-        #     test_size=CONFIG["pi"]["test_size"],
-        #     embargo=CONFIG["pi"]["embargo"],
-        #     min_train_size=CONFIG["pi"]["min_train_size"],
-        #     estimator=rf_final,
-        #     n_repeats=CONFIG["pi"]["n_repeats"],
-        #     agg=CONFIG["pi"]["agg"],
-        #     random_state=RANDOM_STATE,
-        # )
-        # shap_folds_rf, shap_sum_rf = run_shap_over_splits(
-        #     X_df=X, y=y,
-        #     n_splits=CONFIG["shap"]["n_splits"],
-        #     test_size=CONFIG["shap"]["test_size"],
-        #     embargo=CONFIG["shap"]["embargo"],
-        #     min_train_size=CONFIG["shap"]["min_train_size"],
-        #     estimator=rf_final,
-        #     explainer_kind="tree",
-        #     agg=CONFIG["shap"]["agg"],
-        #     random_state=RANDOM_STATE,
-        # )
-        # imp_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_folds.csv"), index=False)
-        # imp_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_perm_feat_summary.csv"), index=False)
-        # shap_folds_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_folds.csv"), index=False)
-        # shap_sum_rf.to_csv(os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary.csv"), index=False)
-
-        bp = best_rf.get_params()
 
         def make_rf():
             return RandomForestRegressor(
                 random_state=RANDOM_STATE,
-                **{k: bp[k] for k in ["n_estimators","max_depth","min_samples_leaf","max_features"] if k in bp}
+                **{k: rf_best_params[k] for k in ["n_estimators","max_depth","min_samples_leaf","max_features"] if k in rf_best_params}
             )
         
         res_rf = run_explain_over_splits(
-            X_df=X, y=y, 
+            X_df=X, y=y,
             make_model=make_rf,
-            shap_kind="tree", 
-            compute_shap=True, 
-            compute_pi=True,
-            n_splits=CONFIG["shap"]["n_splits"], 
-            test_size=CONFIG["shap"]["test_size"], 
-            embargo=CONFIG["shap"]["embargo"], 
+            shap_kind="tree",
+            compute_shap=True, compute_pi=True,
+            n_splits=CONFIG["shap"]["n_splits"],
+            test_size=CONFIG["shap"]["test_size"],
+            embargo=CONFIG["shap"]["embargo"],
             min_train_size=CONFIG["shap"]["min_train_size"],
-            n_repeats=CONFIG["pi"]["n_repeats"], 
+            n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
+            fixed_scaler=fixed_scaler,
         )
+
         # ============== Ergebnisse speichern (EN/RF) ==============
         save_explain_outputs(res_en, RESULTS_DIR, pseudonym, "EN")
         save_explain_outputs(res_rf, RESULTS_DIR, pseudonym, "RF")

@@ -2,9 +2,7 @@
 import json
 import os
 from collections import Counter
-from datetime import timedelta
 
-import forestci as fci
 import numpy as np
 import pandas as pd
 import shap
@@ -14,9 +12,9 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
-from sklearn.linear_model import ElasticNet, ElasticNetCV
+from sklearn.linear_model import ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import GridSearchCV, RepeatedKFold, train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
@@ -41,18 +39,14 @@ from plotting import (
     evaluate_and_plot_parity,
     plot_elasticnet_coefficients,
     plot_feature_importance_stats,
-    plot_mae_rmssd_bar_2,
-    plot_phq2_test_errors_from_results,
-    plot_phq2_timeseries_from_results,
     plot_shap_summary_and_bar,
 )
 
-RESULTS_DIR = "results_with_nightandacrfeatures_standardscaler"
+RESULTS_DIR = "results"
 TOP_K = 15
 RANDOM_STATE = 42
 CACHE_RESULTS_PATH = f"{RESULTS_DIR}/process_participants_results.pkl"
 PHQ2_COLUMN = "abend_PHQ2_sum"
-PHQ9_COLUMN = "woche_PHQ9_sum"
 
 # %% Utility and Pipeline Functions
 
@@ -87,246 +81,30 @@ def prepare_data(df, target_column):
     return X, y, X.columns
 
 
-DAY_AND_NIGHT_FEATURES = [
-    "patient_id",
-    "timestamp_utc",
-    "total_duration_calls_day",
-    "number_of_contacts_day",
-    "total_calling_frequency_day",
-    "nbr_missed_calls_day",
-    "total_duration_calls_night",
-    "number_of_contacts_night",
-    "total_calling_frequency_night",
-    "nbr_missed_calls_night",
-    "abend_PHQ2_sum",
-    "loudness_sma3_amean",
-    "loudness_sma3_stddevNorm",
-    "F0semitoneFrom27.5Hz_sma3nz_amean",
-    "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
-    "jitterLocal_sma3nz_amean",
-    "shimmerLocaldB_sma3nz_amean",
-    "mfcc1V_sma3nz_amean",
-    "mfcc2V_sma3nz_amean",
-    "mfcc3V_sma3nz_amean",
-    "mfcc4V_sma3nz_amean",
-    "steps_sum_rq1_day",
-    "steps_sum_rq1_night",
-    "total_com_rx_day",
-    "total_com_tx_day",
-    "total_com_rx_night",
-    "total_com_tx_night",
-    "total_sm_rx_day",
-    "total_sm_tx_day",
-    "total_sm_rx_night",
-    "total_sm_tx_night",
-    "total_sm_app_usage_day_h",
-    "total_sm_app_usage_night_h",
-    "total_com_app_usage_day_h",
-    "total_com_app_usage_night_h",
-    "HRV_SDNN_rq1_day",
-    "HRV_SD2_rq1_day",
-    "HRV_CVSD_rq1_day",
-    "HRV_LF_rq1_day",
-    "HRV_MadNN_rq1_day",
-    "number_used_ibi_datapoints_rq1_day",
-    "HRV_VHF_rq1_day",
-    "HRV_MeanNN_rq1_day",
-    "HRV_ULF_rq1_day",
-    "HRV_SDRMSSD_rq1_day",
-    "HRV_SampEn_rq1_day",
-    "HRV_SD2_rq1_night",
-    "HRV_SDNN_rq1_night",
-    "HRV_pNN50_rq1_night",
-    "number_used_ibi_datapoints_rq1_night",
-    "HRV_LF_rq1_night",
-    "HRV_MadNN_rq1_night",
-    "HRV_VHF_rq1_night",
-    "HRV_CSI_Modified_rq1_night",
-    "HRV_MeanNN_rq1_night",
-    "HRV_ULF_rq1_night",
-    "HRV_SampEn_rq1_night",
-    "total_activity_min_day",
-    "total_activity_min_night",
-    "last_night_sleep_duration",
-    "daily_sleep_duration",
-]
+feature_config = pd.read_csv("config/feature_config.csv")
+LOG1P_COLS = feature_config[feature_config["scaler"] == "log1p"]["feature"].tolist()
+ZSCORE_COLS = feature_config[feature_config["scaler"] == "zscore"]["feature"].tolist()
+MINMAX_COLS = feature_config[feature_config["scaler"] == "minmax"]["feature"].tolist()
+BASELINE_FEATURES = feature_config[feature_config["baseline"] == 1]["feature"].tolist()
+DAY_FEATURES = feature_config[feature_config["day"] == 1]["feature"].tolist()
+NIGHT_FEATURES = feature_config[feature_config["night"] == 1]["feature"].tolist()
+ACR_FEATURES = feature_config[feature_config["acr"] == 1]["feature"].tolist()
 
-ACR_FEATURES = [
-    "wake intensity gradient_day",
-    "wake ig r-squared_day",
-    "wake max acc 60min [g]_day",
-    "wake light 60s epoch [min]_day",
-    "wake mod 60s epoch [min]_day",
-    "wake vig 60s epoch [min]_day",
-    "wake sed 1min bout [min]_day",
-    "wake sed avg duration_day",
-    "wake sed transition probability_day",
-    "wake sed gini index_day",
-    "wake sed power law distribution_day",
-    "wake SLPA avg duration_day",
-    "wake SLPA gini index_day",
-    "wake SLPA power law distribution_day",
-    "wake MVPA transition probability_day",
-    "wake MVPA gini index_day",
-    "wake MVPA avg hazard_day",
-    "wake MVPA power law distribution_day",
-    "wake dfa alpha_day",
-    "wake dfa activity balance index_day",
-    "wake duration equal avg duration [min]_day",
-    "wake 15min power spectral sum_day",
-    "wake 15min sparc_day",
-    "wake 30min power spectral sum_day",
-    "wake 30min sparc_day",
-    "wake 60min signal entropy_day",
-    "wake 60min sample entropy_day",
-    "wake 60min permutation entropy_day",
-    "wake 60min power spectral sum_day",
-    "wake 60min sparc_day",
-    "wake intensity gradient_night",
-    "wake ig r-squared_night",
-    "wake max acc 60min [g]_night",
-    "wake light 60s epoch [min]_night",
-    "wake mod 60s epoch [min]_night",
-    "wake vig 60s epoch [min]_night",
-    "wake light 10min bout [min]_night",
-    "wake sed avg duration_night",
-    "wake SLPA transition probability_night",
-    "wake SLPA power law distribution_night",
-    "wake MVPA avg duration_night",
-    "wake MVPA power law distribution_night",
-    "wake dfa alpha_night",
-    "wake dfa activity balance index_night",
-    "wake threshold equal avg duration [g]_night",
-    "wake duration equal avg duration [min]_night",
-    "wake 15min spectral entropy_night",
-    "wake 30min spectral entropy_night",
-    "wake 60min sample entropy_night",
-    "wake 60min power spectral sum_night",
-]
-
-LOG1P_COLS = [
-    # Schritte
-    "steps_sum_rq1_day",
-    "steps_sum_rq1_night",
-    # App Traffic / Usage
-    "total_com_rx_day",
-    "total_com_tx_day",
-    "total_com_rx_night",
-    "total_com_tx_night",
-    "total_sm_rx_day",
-    "total_sm_tx_day",
-    "total_sm_rx_night",
-    "total_sm_tx_night",
-    "total_sm_app_usage_day_h",
-    "total_sm_app_usage_night_h",
-    "total_com_app_usage_day_h",
-    "total_com_app_usage_night_h",
-    # HRV Power
-    "HRV_ULF_rq1_day",
-    "HRV_ULF_rq1_night",
-    "HRV_LF_rq1_day",
-    "HRV_LF_rq1_night",
-    "HRV_VHF_rq1_day",
-    "HRV_VHF_rq1_night",
-    # ACR Power / Intensität
-    "wake 15min power spectral sum_day",
-    "wake 30min power spectral sum_day",
-    "wake 60min power spectral sum_day",
-    "wake 60min power spectral sum_night",
-    "wake max acc 60min [g]_day",
-    "wake max acc 60min [g]_night",
-    "wake threshold equal avg duration [g]_night",
-]
-
-ZSCORE_COLS = [
-    # Calls (day/night)
-    "total_duration_calls_day",
-    "number_of_contacts_day",
-    "total_calling_frequency_day",
-    "nbr_missed_calls_day",
-    "total_duration_calls_night",
-    "number_of_contacts_night",
-    "total_calling_frequency_night",
-    "nbr_missed_calls_night",
-    # Audio-Merkmale
-    "loudness_sma3_amean",
-    "loudness_sma3_stddevNorm",
-    "F0semitoneFrom27.5Hz_sma3nz_amean",
-    "F0semitoneFrom27.5Hz_sma3nz_stddevNorm",
-    "jitterLocal_sma3nz_amean",
-    "shimmerLocaldB_sma3nz_amean",
-    "mfcc1V_sma3nz_amean",
-    "mfcc2V_sma3nz_amean",
-    "mfcc3V_sma3nz_amean",
-    "mfcc4V_sma3nz_amean",
-    # HRV Time/Nonlinear (z-score)
-    "HRV_SDNN_rq1_day",
-    "HRV_SDNN_rq1_night",
-    "HRV_SD2_rq1_day",
-    "HRV_SD2_rq1_night",
-    "HRV_MeanNN_rq1_day",
-    "HRV_MeanNN_rq1_night",
-    "HRV_MadNN_rq1_day",
-    "HRV_MadNN_rq1_night",
-    "HRV_SDRMSSD_rq1_day",
-    "HRV_SampEn_rq1_day",
-    "HRV_SampEn_rq1_night",
-    "HRV_CSI_Modified_rq1_night",
-    # ACR – Volumen/Dauern/Komplexität (z-score)
-    "total_activity_min_day",
-    "total_activity_min_night",
-    "wake intensity gradient_day",
-    "wake intensity gradient_night",
-    "wake light 60s epoch [min]_day",
-    "wake light 60s epoch [min]_night",
-    "wake mod 60s epoch [min]_day",
-    "wake mod 60s epoch [min]_night",
-    "wake vig 60s epoch [min]_day",
-    "wake vig 60s epoch [min]_night",
-    "wake light 10min bout [min]_night",
-    "wake sed 1min bout [min]_day",
-    "wake sed avg duration_day",
-    "wake sed avg duration_night",
-    "wake SLPA avg duration_day",
-    "wake MVPA avg duration_night",
-    "wake sed power law distribution_day",
-    "wake SLPA power law distribution_day",
-    "wake SLPA power law distribution_night",
-    "wake MVPA power law distribution_day",
-    "wake MVPA power law distribution_night",
-    "wake dfa alpha_day",
-    "wake dfa alpha_night",
-    "wake duration equal avg duration [min]_day",
-    "wake duration equal avg duration [min]_night",
-    "wake 15min sparc_day",
-    "wake 30min sparc_day",
-    "wake 60min sparc_day",
-    "wake 60min signal entropy_day",
-    "wake 60min sample entropy_day",
-    "wake 60min permutation entropy_day",
-    "wake 15min spectral entropy_night",
-    "wake 30min spectral entropy_night",
-    "wake 60min sample entropy_night",
-    # Sleep-Dauern
-    "last_night_sleep_duration",
-    "daily_sleep_duration",
-    "nightly_sleep_duration_18_24",
-    "nightly_sleep_duration_00_06",
-]
-
-COLUMNS_TO_CONSIDER = DAY_AND_NIGHT_FEATURES + ACR_FEATURES
+FEATURES_TO_CONSIDER = BASELINE_FEATURES + DAY_FEATURES + NIGHT_FEATURES + ACR_FEATURES
 
 feature_scalers = {}
-for col in list(set(LOG1P_COLS).intersection(set(COLUMNS_TO_CONSIDER))):
+for col in list(set(LOG1P_COLS).intersection(set(FEATURES_TO_CONSIDER))):
     feature_scalers[col] = Log1pScaler()
-for col in list(set(ZSCORE_COLS).intersection(set(COLUMNS_TO_CONSIDER))):
+for col in list(set(ZSCORE_COLS).intersection(set(FEATURES_TO_CONSIDER))):
     feature_scalers[col] = StandardScaler()
+for col in list(set(MINMAX_COLS).intersection(set(FEATURES_TO_CONSIDER))):
+    feature_scalers[col] = MinMaxScaler()
 
 pre_scalers = ColumnTransformer(
     transformers=[
         (f"scale_{col}", scaler, [col]) for col, scaler in feature_scalers.items()
     ],
-    remainder=StandardScaler(),
+    remainder="passthrough",
 )
 
 
@@ -339,23 +117,9 @@ def preprocess_pipeline():
                     max_iter=20, random_state=RANDOM_STATE, keep_empty_features=True
                 ),
             ),
-            # ("per_feature_scalers", pre_scalers),
-            ("scaler", StandardScaler()),
+            ("per_feature_scalers", pre_scalers),
         ]
     )
-
-
-# Helper: RMSSD computation
-def compute_rmssd(series):
-    values = pd.Series(series).astype("float").to_numpy()
-    diffs = np.diff(values)
-    diffs = diffs[~np.isnan(diffs)]
-    if len(diffs) == 0:
-        return np.nan
-    return np.sqrt(np.nanmean(diffs**2))
-
-
-# %% Main Processing Function
 
 
 def days_since_start(group):
@@ -367,16 +131,6 @@ def process_participants(df_raw, pseudonyms, target_column):
     results = {}
     rmssd_values_phq2 = []
     plot_data = {}
-
-    # columns_to_drop = list(
-    #     set(df_raw.columns) - set(["timestamp_utc", "pseudonym", target_column])
-    # )
-    # df_raw = df_raw.drop(columns=columns_to_drop)
-    df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
-    df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
-    df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
-        days_since_start
-    )
 
     elasticnet_feature_importances = {
         feature: []
@@ -399,16 +153,6 @@ def process_participants(df_raw, pseudonyms, target_column):
     for pseudonym in pseudonyms:
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365]
-        df_participant_timeaware = df_participant.set_index("timestamp_utc").copy()
-        y_rolling_mean = (
-            df_participant_timeaware[target_column]
-            .rolling(window=timedelta(days=2 * 7))
-            .mean()
-        )
-        # Compute RMSSD for PHQ-2
-        rmssd_phq2 = compute_rmssd(df_participant["abend_PHQ2_sum"].values)
-
-        # df_participant[target_column] = df_participant[target_column].diff()
 
         # --- Prepare data ---
         X, y, feature_names = prepare_data(df_participant, target_column)
@@ -432,36 +176,27 @@ def process_participants(df_raw, pseudonyms, target_column):
         X_test_transformed = pipeline.transform(
             pd.DataFrame(X_test, columns=feature_names)
         )
-        X_transformed = pipeline.transform(pd.DataFrame(X, columns=feature_names))
 
         df = df_participant.reset_index(drop=True)
-        full_mask = df[target_column].notna()
         train_mask = df.loc[idx_train, target_column].notna()
         test_mask = df.loc[idx_test, target_column].notna()
-        full_train_mask = df.index.isin(idx_train) & full_mask
-        full_test_mask = df.index.isin(idx_test) & full_mask
 
         X_train = X_train_transformed[train_mask.values]
         y_train = y_train[train_mask.values]
-        y_train_rolling_mean = y_rolling_mean.iloc[idx_train][train_mask.values]
         X_test = X_test_transformed[test_mask.values]
         y_test = y_test[test_mask.values]
-        X_traintest = X_transformed[full_mask.values]
-        y_traintest = y[full_mask.values]
 
-        full_mask = df_participant[target_column].notna()
-        df_model = df_participant.loc[full_mask.values]
-        timestamps_model = df_model["timestamp_utc"].astype(str).tolist()
-        # weights = np.abs(y_train - y_train_rolling_mean)
-        # weights = np.ones(len(y_train))
-
-        # cv = RepeatedKFold(n_splits=5, n_repeats=3, random_state=RANDOM_STATE)
         cv = 5
 
         try:
             # --- Elastic Net ---
             print("Training Elastic Net...")
-            elastic = ElasticNetCV(cv=cv, l1_ratio=0.5, random_state=RANDOM_STATE)
+            elastic = ElasticNetCV(
+                cv=cv,
+                l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 1.0],
+                alphas=None,  # default grid,
+                random_state=RANDOM_STATE,
+            )
 
             elastic.fit(
                 X_train,
@@ -503,23 +238,6 @@ def process_participants(df_raw, pseudonyms, target_column):
             print(f"Elastic Net failed for {pseudonym}: {e}")
             continue
 
-        # ---------- Elastic Net: Bootstrapped Prädiktionsintervall -------------
-        print("Computing bootstrapped prediction intervals for Elastic Net...")
-        n_boot = 300
-        boot_preds = np.empty((n_boot, len(X_traintest)))
-
-        for i in range(n_boot):
-            boot_idx = np.random.randint(0, len(X_train), len(X_train))
-            X_b, y_b = X_train.iloc[boot_idx], y_train[boot_idx]
-            en_b = ElasticNetCV(cv=cv, l1_ratio=0.5, random_state=RANDOM_STATE + i)
-            en_b.fit(X_b, y_b)
-            boot_preds[i] = en_b.predict(X_traintest)
-
-        # Punktvorhersage = Median der Bootstrap-Verteilungen
-        y_pred_elastic_full = np.median(boot_preds, axis=0)
-        en_lower = np.percentile(boot_preds, 2.5, axis=0)
-        en_upper = np.percentile(boot_preds, 97.5, axis=0)
-
         # --- Random Forest ---
         print("Training Random Forest...")
         rf = RandomForestRegressor(random_state=RANDOM_STATE)
@@ -548,14 +266,6 @@ def process_participants(df_raw, pseudonyms, target_column):
         r2_rf = round(r2_score(y_test, y_pred_rf), 2)
         mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 1)
 
-        y_pred_rf_full = best_rf.predict(X_traintest)
-        # ---------- Jackknife-Varianz & PI -------------------------------------
-        print("Computing jackknife variance for Random Forest...")
-        rf_var = fci.random_forest_error(best_rf, X_train.shape, X_traintest)
-        rf_sigma = np.sqrt(rf_var)
-        rf_lower = y_pred_rf_full - 1.96 * rf_sigma
-        rf_upper = y_pred_rf_full + 1.96 * rf_sigma
-
         evaluate_and_plot_parity(
             RESULTS_DIR, y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03"
         )
@@ -573,66 +283,12 @@ def process_participants(df_raw, pseudonyms, target_column):
         top_rf_features = [feature_names[i] for i in top_indices]
         rf_feature_counts.update(top_rf_features)
 
-        raw_samples_not_covered_by_elastic_pi_ser = pd.Series(
-            (y_traintest < en_lower) | (y_traintest > en_upper)
-        )
-        percent_raw_samples_not_covered_by_elastic_prediction_interval = (
-            raw_samples_not_covered_by_elastic_pi_ser.value_counts().get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-        percent_raw_samples_not_covered_by_elastic_prediction_interval_train = (
-            raw_samples_not_covered_by_elastic_pi_ser.loc[full_train_mask]
-            .value_counts()
-            .get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-        percent_raw_samples_not_covered_by_elastic_prediction_interval_test = (
-            raw_samples_not_covered_by_elastic_pi_ser.loc[full_test_mask]
-            .value_counts()
-            .get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-
-        raw_samples_not_covered_by_rf_pi_ser = pd.Series(
-            (y_traintest < rf_lower) | (y_traintest > rf_upper)
-        )
-        percent_raw_samples_not_covered_by_rf_prediction_interval = (
-            raw_samples_not_covered_by_rf_pi_ser.value_counts().get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-        percent_raw_samples_not_covered_by_rf_prediction_interval_train = (
-            raw_samples_not_covered_by_rf_pi_ser.loc[full_train_mask]
-            .value_counts()
-            .get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-        percent_raw_samples_not_covered_by_rf_prediction_interval_test = (
-            raw_samples_not_covered_by_rf_pi_ser.loc[full_test_mask]
-            .value_counts()
-            .get(True, 0)
-            / len(y_traintest)
-            * 100
-        )
-
         # Store per-participant results
         results[pseudonym] = {
             "r2_elastic": r2_elastic,
             "mae_elastic": mae_elastic,
             "r2_rf": r2_rf,
             "mae_rf": mae_rf,
-            "rmssd_phq2": rmssd_phq2,
-            "percent_raw_sample_not_covered_by_elastic_prediction_interval": percent_raw_samples_not_covered_by_elastic_prediction_interval,
-            "percent_raw_sample_not_covered_by_elastic_prediction_interval_train": percent_raw_samples_not_covered_by_elastic_prediction_interval_train,
-            "percent_raw_sample_not_covered_by_elastic_prediction_interval_test": percent_raw_samples_not_covered_by_elastic_prediction_interval_test,
-            "percent_raw_sample_not_covered_by_rf_prediction_interval": percent_raw_samples_not_covered_by_rf_prediction_interval,
-            "percent_raw_sample_not_covered_by_rf_prediction_interval_train": percent_raw_samples_not_covered_by_rf_prediction_interval_train,
-            "percent_raw_sample_not_covered_by_rf_prediction_interval_test": percent_raw_samples_not_covered_by_rf_prediction_interval_test,
-            # placeholder, will fill low_variance after we compute percentiles
             "low_variance_candidate": None,
             "elastic_mae_lower_rmssd_phq2": None,
             "rf_mae_lower_rmssd_phq2": None,
@@ -640,22 +296,6 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rf_mae+10p_lower_rmssd_phq2": None,
             "elastic_rsquared_and_mae_criteria": None,
             "rf_rsquared_and_mae_criteria": None,
-        }
-        plot_data[pseudonym] = {
-            "timestamps": timestamps_model,
-            "phq2_raw": y_traintest.tolist(),
-            "train_mask": full_train_mask.tolist(),
-            "test_mask": full_test_mask.tolist(),
-            "elastic": {
-                "pred": y_pred_elastic_full.tolist(),
-                "lower": en_lower.tolist(),
-                "upper": en_upper.tolist(),
-            },
-            "rf": {
-                "pred": y_pred_rf_full.tolist(),
-                "lower": rf_lower.tolist(),
-                "upper": rf_upper.tolist(),
-            },
         }
 
     # Compute 25th percentile thresholds across all participants
@@ -667,29 +307,6 @@ def process_participants(df_raw, pseudonyms, target_column):
         is_low_var = results[pseudonym]["rmssd_phq2"] < phq2_thresh
         results[pseudonym]["low_variance_candidate"] = is_low_var
 
-        is_elastic_mae_lower_rmssd_phq2 = (
-            results[pseudonym]["mae_elastic"] < results[pseudonym]["rmssd_phq2"]
-        )
-        results[pseudonym][
-            "elastic_mae_lower_rmssd_phq2"
-        ] = is_elastic_mae_lower_rmssd_phq2
-
-        is_rf_mae_lower_rmssd_phq2 = (
-            results[pseudonym]["mae_rf"] < results[pseudonym]["rmssd_phq2"]
-        )
-        results[pseudonym]["rf_mae_lower_rmssd_phq2"] = is_rf_mae_lower_rmssd_phq2
-        is_elastic_mae_plus_10p_lower_rmssd_phq2 = (
-            results[pseudonym]["mae_elastic"] * 1.1 < results[pseudonym]["rmssd_phq2"]
-        )
-        results[pseudonym][
-            "elastic_mae+10p_lower_rmssd_phq2"
-        ] = is_elastic_mae_plus_10p_lower_rmssd_phq2
-        is_rf_mae_plus_10p_lower_rmssd_phq2 = (
-            results[pseudonym]["mae_rf"] * 1.1 < results[pseudonym]["rmssd_phq2"]
-        )
-        results[pseudonym][
-            "rf_mae+10p_lower_rmssd_phq2"
-        ] = is_rf_mae_plus_10p_lower_rmssd_phq2
         results[pseudonym]["elastic_rsquared_and_mae_criteria"] = (
             results[pseudonym]["r2_elastic"] >= 0.3
             and results[pseudonym]["mae_elastic"] <= 2
@@ -711,7 +328,7 @@ def process_participants(df_raw, pseudonyms, target_column):
     filtered_elasticnet_feature_importances = {
         feature: [
             value
-            for i, (pseudonym, res) in enumerate(results.items())
+            for i, (pseudonym, _) in enumerate(results.items())
             if pseudonym in valid_pseudonyms
             and i < len(elasticnet_feature_importances[feature])
             for value in [elasticnet_feature_importances[feature][i]]
@@ -730,7 +347,7 @@ def process_participants(df_raw, pseudonyms, target_column):
     filtered_rf_feature_importances = {
         feature: [
             value
-            for i, (pseudonym, res) in enumerate(results.items())
+            for i, (pseudonym, _) in enumerate(results.items())
             if pseudonym in valid_pseudonyms
             and i < len(rf_feature_importances[feature])
             for value in [rf_feature_importances[feature][i]]
@@ -771,8 +388,15 @@ def process_participants(df_raw, pseudonyms, target_column):
 
 # %% Run the pipeline
 # Load dataset
+target_column = PHQ2_COLUMN
+
 df_raw = pd.read_pickle("data/df_merged_v7.pickle")
-df_raw = df_raw[COLUMNS_TO_CONSIDER]
+df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
+df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
+df_raw["day_since_start"] = df_raw.groupby("patient_id", group_keys=False).apply(
+    days_since_start
+)
+df_raw = df_raw[["patient_id", "timestamp_utc", target_column] + FEATURES_TO_CONSIDER]
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"
@@ -783,7 +407,6 @@ df_raw["pseudonym"] = df_raw["patient_id"].map(id_to_pseudonym)
 df_raw = df_raw.dropna(subset=["pseudonym"])
 df_raw = df_raw.drop(columns=["patient_id"])
 
-target_column = PHQ2_COLUMN
 pseudonyms = df_raw["pseudonym"].unique()
 
 
@@ -815,29 +438,6 @@ else:
         (results, elastic_counts, rf_counts, elastic_stats, rf_stats, plot_data),
         CACHE_RESULTS_PATH,
     )
-
-
-# %% Plot MAE and RMSSD for each participant
-plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="elastic")
-plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="rf")
-
-# %% Plot PHQ-2 time series with predictions
-plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "elastic")
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic")
-plot_phq2_test_errors_from_results(
-    RESULTS_DIR,
-    plot_data,
-    "elastic",
-    show_pred_ci=False,
-)
-plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "rf")
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf")
-plot_phq2_test_errors_from_results(
-    RESULTS_DIR,
-    plot_data,
-    "rf",
-    show_pred_ci=False,
-)
 
 # %% Save evaluation metrics
 results_df = pd.DataFrame.from_dict(results, orient="index")

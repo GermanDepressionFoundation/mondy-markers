@@ -3,7 +3,7 @@ import json
 import os
 from collections import Counter
 from datetime import timedelta
-from typing import List, Tuple, Dict, Callable
+from typing import Callable, Dict, List, Tuple
 
 import joblib
 import numpy as np
@@ -12,6 +12,7 @@ import shap
 from sklearn import set_config
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
+from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer, SimpleImputer
@@ -19,8 +20,7 @@ from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.dummy import DummyRegressor
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 set_config(transform_output="pandas")
 
@@ -28,70 +28,62 @@ set_config(transform_output="pandas")
 CONFIG = {
     "random_state": 42,
     "top_k": 15,
-
     "paths": {
         "data": "data/df_merged_v7.pickle",
         "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_test",
     },
-
     "targets": {
         "phq2": "abend_PHQ2_sum",
         "phq9": "woche_PHQ9_sum",
     },
-
     # 70:30 chronologischer Holdout
     "holdout_test_frac": 0.70,
-
     # Anteil Startfenster für HP-Tuning und Fix-Scaler-Fit
-    "init_frac_for_hp": 0.30, 
-
+    "init_frac_for_hp": 0.30,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
-
     # globalen Scaler einmal im Startfenster fitten?
     "use_fixed_scaler": True,
-
-    # Elastic Net 
+    # Elastic Net
     "en": {
-        "scoring": "r2", # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
+        "scoring": "r2",  # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
         "tune_l1_ratio": False,  # True: l1_ratio in [0.1, 0.5, 0.9] mit-tunen
-        "l1_ratio": 0.5, 
+        "l1_ratio": 0.5,
         "max_iter": 50000,
-        "tol": 1e-2, 
+        "tol": 1e-2,
         "param_grid": {
-            "model__alpha": list(np.logspace(-3, 2, 12)), # 0.000001 bis 10 weniger schrumpfen
-        }, 
+            "model__alpha": list(
+                np.logspace(-3, 2, 12)
+            ),  # 0.000001 bis 10 weniger schrumpfen
+        },
         "en_l1_grid": [0.0, 0.1, 0.3, 0.5],
     },
-
-    # Random Forest 
+    # Random Forest
     "rf": {
         "scoring": "r2",
         "param_grid": {
             "model__max_depth": [4, 6, 8, 10, 15, 20, None],
             "model__n_estimators": [100, 200, 400, 800],
             "model__min_samples_leaf": [1, 2, 4, 6, 8],
-        }
+        },
     },
-
     # Rolling Permutation Importance
     "pi": {
         "n_splits": 5,
         "test_size": 30,
         "min_train_size": 90,
         "embargo": 0,
-        "n_repeats": 10, # 10 nunr für smoke test (sonst 50)
+        "n_repeats": 10,  # 10 nunr für smoke test (sonst 50)
         "agg": "mean",  # "mean" oder "median"
-        "block_len": 7  # Länge der Blöcke für blockweise Permutation
+        "block_len": 7,  # Länge der Blöcke für blockweise Permutation
     },
-
     # Rolling SHAP (gleiche Fenster wie PI)
     "shap": {
         "n_splits": 5,
         "test_size": 30,
         "min_train_size": 90,
         "embargo": 0,
-        "agg": "mean"  # "mean" oder "median"
+        "agg": "mean",  # "mean" oder "median"
     },
 }
 
@@ -101,7 +93,9 @@ os.makedirs(CONFIG["paths"]["results_dir"], exist_ok=True)
 CONFIG["paths"]["cache_results"] = os.path.join(
     CONFIG["paths"]["results_dir"], "process_participants_results.pkl"
 )
-with open(os.path.join(CONFIG["paths"]["results_dir"], "config.json"), "w", encoding="utf-8") as f:
+with open(
+    os.path.join(CONFIG["paths"]["results_dir"], "config.json"), "w", encoding="utf-8"
+) as f:
     json.dump(CONFIG, f, indent=2)
 
 # DEFS
@@ -129,32 +123,36 @@ FEATURES_TO_CONSIDER = BASELINE_FEATURES + DAY_FEATURES + NIGHT_FEATURES + ACR_F
 def _feats(cats):
     return feature_config[feature_config["category"].isin(cats)]["feature"].tolist()
 
+
 # Gruppen (ohne Day/Night)
 COARSE_GROUPS = {
-    "HRV":  _feats(["HRV"]),
-    "ACR":  _feats(["steps", "ACR"]),          # Aktivität/Transitions
-    "COMM": _feats(["app usage", "calls"]),    # Kommunikation / App-Use
-    "AUDIO":_feats(["audio"]),                 # Sprach-/Stimm-Proxys
-    "SLEEP":_feats(["sleep"]),
-    "CAL":  _feats(["time"]),                  # Kalender/Trend
+    "HRV": _feats(["HRV"]),
+    "ACR": _feats(["steps", "ACR"]),  # Aktivität/Transitions
+    "COMM": _feats(["app usage", "calls"]),  # Kommunikation / App-Use
+    "AUDIO": _feats(["audio"]),  # Sprach-/Stimm-Proxys
+    "SLEEP": _feats(["sleep"]),
+    "CAL": _feats(["time"]),  # Kalender/Trend
 }
 
 # Day/Night-Variante für Quellen
 DAY_NIGHT_GROUPS = {}
 for name, cats in {
-    "HRV":  ["HRV"],
-    "ACR":  ["steps", "ACR"],
+    "HRV": ["HRV"],
+    "ACR": ["steps", "ACR"],
     "COMM": ["app usage", "calls"],
-    "SLEEP":["sleep"],
+    "SLEEP": ["sleep"],
 }.items():
     for period in ["day", "night"]:
         mask = feature_config["category"].isin(cats) & (feature_config[period] == 1)
-        DAY_NIGHT_GROUPS[f"{name}_{period}"] = feature_config.loc[mask, "feature"].tolist()
+        DAY_NIGHT_GROUPS[f"{name}_{period}"] = feature_config.loc[
+            mask, "feature"
+        ].tolist()
 
-#leere Gruppen entfernen
+# leere Gruppen entfernen
 DAY_NIGHT_GROUPS = {k: v for k, v in DAY_NIGHT_GROUPS.items() if v}
 
 CONFIG["feature_groups"] = COARSE_GROUPS
+
 
 # ============ Feature-spezifische Scaler ======================================
 class Log1pScaler(BaseEstimator, TransformerMixin):
@@ -179,7 +177,7 @@ class Log1pScaler(BaseEstimator, TransformerMixin):
         # negative auf 0 clippen (log1p robust)
         X_arr = np.clip(X_arr, 0, None)
         out = np.log1p(X_arr)
-        return out  
+        return out
 
     def inverse_transform(self, X):
         return np.expm1(X)
@@ -198,18 +196,20 @@ class Log1pScaler(BaseEstimator, TransformerMixin):
 from plotting import (
     evaluate_and_plot_parity,
     plot_feature_importance_stats,
+    plot_folds_on_timeseries,
+    plot_importance_bars,
     plot_mae_rmssd_bar_2,
     plot_phq2_test_errors_from_results,
     plot_phq2_timeseries_from_results,
     plot_shap_summary_and_bar,
     plot_timeseries_with_folds,
-    plot_importance_bars,
-    plot_folds_on_timeseries,
 )
+
 
 # %% Utility and Pipeline Functions ============================================
 def ensure_results_dir():
     os.makedirs(f"{RESULTS_DIR}/models", exist_ok=True)
+
 
 def replace_outliers_with_nan(df, multiplier=1.5):
     df_out = df.copy()
@@ -223,12 +223,14 @@ def replace_outliers_with_nan(df, multiplier=1.5):
         df_out.loc[mask, col] = np.nan
     return df_out
 
+
 def prepare_data(df, target_column):
     df = df.drop(columns=["pseudonym", "timestamp_utc"], errors="ignore").astype(float)
     y = df[target_column].values
     X = df.drop(columns=[target_column])
     X = replace_outliers_with_nan(X, multiplier=1.5)
     return X, y, X.columns
+
 
 feature_scalers = {}
 for col in list(set(LOG1P_COLS).intersection(set(FEATURES_TO_CONSIDER))):
@@ -239,20 +241,38 @@ for col in list(set(MINMAX_COLS).intersection(set(FEATURES_TO_CONSIDER))):
     feature_scalers[col] = MinMaxScaler()
 
 pre_scalers = ColumnTransformer(
-    transformers=[(f"scale_{col}", scaler, [col]) for col, scaler in feature_scalers.items()],
+    transformers=[
+        (f"scale_{col}", scaler, [col]) for col, scaler in feature_scalers.items()
+    ],
     remainder=StandardScaler(),
     verbose_feature_names_out=False,
 )
 
+
 def preprocess_pipeline():
     # Imputer -> per-Feature-Scaler -> globale z-Skalierung -> finaler Imputer (0.0)
-    return Pipeline([
-        ("imputer", IterativeImputer(max_iter=50,tol=1e-2,n_nearest_features=30,random_state=RANDOM_STATE, keep_empty_features=True)),
-        ("meanimputer", SimpleImputer(strategy="mean")), # only do somthing if IterativeImputer produces NaNs
-        ("per_feature_scalers", pre_scalers),
-        ("scaler", StandardScaler()),
-        #("final_imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-    ])
+    return Pipeline(
+        [
+            (
+                "imputer",
+                IterativeImputer(
+                    max_iter=50,
+                    tol=1e-2,
+                    n_nearest_features=30,
+                    random_state=RANDOM_STATE,
+                    # keep_empty_features=True,
+                ),
+            ),
+            # (
+            #     "meanimputer",
+            #     SimpleImputer(strategy="mean"),
+            # ),  # only do somthing if IterativeImputer produces NaNs
+            ("per_feature_scalers", pre_scalers),
+            ("scaler", StandardScaler()),
+            # ("final_imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+        ]
+    )
+
 
 def compute_rmssd(series):
     values = pd.Series(series).astype(float).to_numpy()
@@ -261,6 +281,7 @@ def compute_rmssd(series):
     if len(diffs) == 0:
         return np.nan
     return np.sqrt(np.nanmean(diffs**2))
+
 
 # %% ZEIT-SPLITS (Rolling-Origin, expanding) ============================
 def rolling_origin_splits(
@@ -280,7 +301,9 @@ def rolling_origin_splits(
     max_last_test_end = n_samples - test_size
     if max_last_test_end <= min_train_size:
         return splits
-    train_ends = np.linspace(min_train_size, max_last_test_end - embargo, n_splits, dtype=int)
+    train_ends = np.linspace(
+        min_train_size, max_last_test_end - embargo, n_splits, dtype=int
+    )
     for tr_end in train_ends:
         tr_idx = np.arange(0, tr_end)
         start_test = tr_end + embargo
@@ -291,6 +314,7 @@ def rolling_origin_splits(
         if len(tr_idx) >= min_train_size and len(te_idx) >= 5:
             splits.append((tr_idx, te_idx))
     return splits
+
 
 def preprocess_train_only():
     """
@@ -313,12 +337,29 @@ def preprocess_train_only():
     """
     # Beispiel: baue hier deine bisherigen Steps OHNE finalen globalen StandardScaler
     # (Passe an deine realen Step-Namen/Objekte an!)
-    return Pipeline([
-        ("imputer_mice", IterativeImputer(max_iter=50, tol=1e-2, random_state=CONFIG["random_state"])),
-        ("simple_imputer", SimpleImputer(strategy="mean")),
-        ("per_feature_scalers", pre_scalers),  # dein bestehender ColumnTransformer je Quelle
-        # KEIN globaler StandardScaler hier!
-    ])
+    return Pipeline(
+        [
+            (
+                "imputer_mice",
+                IterativeImputer(
+                    max_iter=50,
+                    tol=1e-2,
+                    random_state=CONFIG["random_state"],
+                    keep_empty_features=True,
+                ),
+            ),
+            (
+                "simple_imputer",
+                SimpleImputer(strategy="mean", keep_empty_features=True),
+            ),
+            (
+                "per_feature_scalers",
+                pre_scalers,
+            ),  # dein bestehender ColumnTransformer je Quelle
+            # KEIN globaler StandardScaler hier!
+        ]
+    )
+
 
 def fit_fixed_global_scaler(X_init: pd.DataFrame):
     """
@@ -348,6 +389,7 @@ def fit_fixed_global_scaler(X_init: pd.DataFrame):
     scaler.fit(X_init)
     return scaler
 
+
 def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> int:
     """
     Bestimmt das Ende des Startfensters für HP-Tuning & Fix-Scaler-Fit.
@@ -374,12 +416,14 @@ def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> in
     - Typischerweise 30 % oder min_train_size, was immer größer ist.
     """
     import math
+
     return max(int(math.floor(frac * n_samples)), int(min_train_size))
+
 
 # %%  PERMUTATION-IMPORTANCE (modell-agnostisch) =========================
 def permutation_importance_per_feature(
     fitted_estimator: BaseEstimator,
-    X_test: pd.DataFrame,   # PREPROCESSED DataFrame (Feature-Namen wichtig)
+    X_test: pd.DataFrame,  # PREPROCESSED DataFrame (Feature-Namen wichtig)
     y_test: np.ndarray,
     n_repeats: int = 50,
     random_state: int = 42,
@@ -402,12 +446,19 @@ def permutation_importance_per_feature(
             MAE_p = mean_absolute_error(y_test, y_hat)
             dR2_list.append(R2_base - R2_p)
             dMAE_list.append(MAE_p - MAE_base)
-        rows.append({
-            "feature": str(col).split("__")[-1],
-            "delta_R2": float(np.mean(dR2_list)),
-            "delta_MAE": float(np.mean(dMAE_list)),
-        })
-    return pd.DataFrame(rows).sort_values("delta_R2", ascending=False).reset_index(drop=True)
+        rows.append(
+            {
+                "feature": str(col).split("__")[-1],
+                "delta_R2": float(np.mean(dR2_list)),
+                "delta_MAE": float(np.mean(dMAE_list)),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values("delta_R2", ascending=False)
+        .reset_index(drop=True)
+    )
+
 
 def run_feature_permutation_importance_over_splits(
     X_df: pd.DataFrame,
@@ -416,15 +467,18 @@ def run_feature_permutation_importance_over_splits(
     test_size: int,
     embargo: int,
     min_train_size: int,
-    estimator: BaseEstimator,    # bereits mit finalen HP konfiguriert
+    estimator: BaseEstimator,  # bereits mit finalen HP konfiguriert
     n_repeats: int = 50,
     agg: str = "mean",
     random_state: int = 42,
 ):
     n = len(y)
     splits = rolling_origin_splits(
-        n_samples=n, n_splits=n_splits, test_size=test_size,
-        embargo=embargo, min_train_size=min_train_size,
+        n_samples=n,
+        n_splits=n_splits,
+        test_size=test_size,
+        embargo=embargo,
+        min_train_size=min_train_size,
     )
 
     all_rows = []
@@ -464,6 +518,7 @@ def run_feature_permutation_importance_over_splits(
     )
     return imp_folds, imp_summary
 
+
 # %% ROLLING SHAP (modell-agnostisch) ===================================
 def pick_shap_explainer(estimator: BaseEstimator, kind: str, Xt_train: pd.DataFrame):
     """Wählt den passenden SHAP-Explainer."""
@@ -473,11 +528,17 @@ def pick_shap_explainer(estimator: BaseEstimator, kind: str, Xt_train: pd.DataFr
         return shap.TreeExplainer(estimator)
     # auto
     name = estimator.__class__.__name__.lower()
-    if "randomforest" in name or "gradientboost" in name or "xgb" in name or "lgbm" in name:
+    if (
+        "randomforest" in name
+        or "gradientboost" in name
+        or "xgb" in name
+        or "lgbm" in name
+    ):
         return shap.TreeExplainer(estimator)
     if "elasticnet" in name or "lasso" in name or "ridge" in name or "linear" in name:
         return shap.LinearExplainer(estimator, Xt_train)
     return shap.Explainer(estimator, Xt_train)
+
 
 def run_shap_over_splits(
     X_df: pd.DataFrame,
@@ -486,7 +547,7 @@ def run_shap_over_splits(
     test_size: int,
     embargo: int,
     min_train_size: int,
-    estimator: BaseEstimator,      # mit finalen HP konfiguriert
+    estimator: BaseEstimator,  # mit finalen HP konfiguriert
     explainer_kind: str = "auto",  # "auto" | "linear" | "tree"
     agg: str = "mean",
     random_state: int = 42,
@@ -520,9 +581,14 @@ def run_shap_over_splits(
         mean_abs = np.abs(shap_vals).mean(axis=0)
         mean_signed = shap_vals.mean(axis=0)
         for f, a, s in zip(cols, mean_abs, mean_signed):
-            rows.append({"fold": fold_id, "feature": f,
-                         "mean_abs_shap": float(a),
-                         "mean_signed_shap": float(s)})
+            rows.append(
+                {
+                    "fold": fold_id,
+                    "feature": f,
+                    "mean_abs_shap": float(a),
+                    "mean_signed_shap": float(s),
+                }
+            )
 
     if not rows:
         return pd.DataFrame(), pd.DataFrame()
@@ -541,10 +607,17 @@ def run_shap_over_splits(
     )
     return shap_folds, shap_summary
 
+
 def evaluate_over_splits(
-    X_df, y, make_model,                 
-    n_splits=5, test_size=30, embargo=0, min_train_size=90,
-    timestamps=None, model_label="model"
+    X_df,
+    y,
+    make_model,
+    n_splits=5,
+    test_size=30,
+    embargo=0,
+    min_train_size=90,
+    timestamps=None,
+    model_label="model",
 ):
     """
     Pro Fold: Preprocessing NUR auf Train fitten, Modell trainieren, auf Test bewerten.
@@ -552,8 +625,11 @@ def evaluate_over_splits(
     R2_baseline_last, R2_baseline_mean) zurück.
     """
     splits = rolling_origin_splits(
-        n_samples=len(y), n_splits=n_splits, test_size=test_size,
-        embargo=embargo, min_train_size=min_train_size
+        n_samples=len(y),
+        n_splits=n_splits,
+        test_size=test_size,
+        embargo=embargo,
+        min_train_size=min_train_size,
     )
 
     rows = []
@@ -570,25 +646,35 @@ def evaluate_over_splits(
         y_base_last = np.full_like(y[te], fill_value=y[tr][-1], dtype=float)
         y_base_mean = np.full_like(y[te], fill_value=np.mean(y[tr]), dtype=float)
 
-        rows.append({
-            "model": model_label,
-            "fold": fold_id,
-            "train_size": len(tr),
-            "test_size": len(te),
-            "fold_start_idx": int(te[0]),
-            "fold_end_idx": int(te[-1]),
-            "fold_end_ts": (str(timestamps[te[-1]]) if timestamps is not None else None),
-            "r2": float(r2_score(y[te], y_hat)),
-            "mae": float(mean_absolute_error(y[te], y_hat)),
-            "r2_baseline_last": float(r2_score(y[te], y_base_last)),
-            "r2_baseline_mean": float(r2_score(y[te], y_base_mean)),
-        })
+        rows.append(
+            {
+                "model": model_label,
+                "fold": fold_id,
+                "train_size": len(tr),
+                "test_size": len(te),
+                "fold_start_idx": int(te[0]),
+                "fold_end_idx": int(te[-1]),
+                "fold_end_ts": (
+                    str(timestamps[te[-1]]) if timestamps is not None else None
+                ),
+                "r2": float(r2_score(y[te], y_hat)),
+                "mae": float(mean_absolute_error(y[te], y_hat)),
+                "r2_baseline_last": float(r2_score(y[te], y_base_last)),
+                "r2_baseline_mean": float(r2_score(y[te], y_base_mean)),
+            }
+        )
 
     return pd.DataFrame(rows)
 
+
 def permutation_importance_by_group(
-    fitted_estimator, X_test, y_test, groups: Dict[str, list],
-    n_repeats=50, block_len=7, random_state=42
+    fitted_estimator,
+    X_test,
+    y_test,
+    groups: Dict[str, list],
+    n_repeats=50,
+    block_len=7,
+    random_state=42,
 ):
     """
     Blockierte, gruppenweise Permutation Importance für Zeitreihen.
@@ -667,14 +753,16 @@ def permutation_importance_by_group(
     rows = []
     for gname, gcols in groups.items():
         col_idx = [X_test.columns.get_loc(c) for c in gcols if c in X_test.columns]
-        if not col_idx: 
+        if not col_idx:
             continue
         dR2_list, dMAE_list = [], []
         for _ in range(n_repeats):
             Xp = X_test.copy()
             # alle Spalten der Gruppe gemeinsam block-permutieren (gleicher Blockorder)
             n = len(Xp)
-            blocks = [np.arange(i, min(i+block_len, n)) for i in range(0, n, block_len)]
+            blocks = [
+                np.arange(i, min(i + block_len, n)) for i in range(0, n, block_len)
+            ]
             order = rng.permutation(len(blocks))
             new_idx = np.concatenate([blocks[i] for i in order])
             for j in col_idx:
@@ -683,8 +771,24 @@ def permutation_importance_by_group(
             y_hat = fitted_estimator.predict(Xp)
             dR2_list.append(R2_base - r2_score(y_test, y_hat))
             dMAE_list.append(mean_absolute_error(y_test, y_hat) - MAE_base)
-        rows.append({"group": gname, "delta_R2": np.mean(dR2_list), "delta_MAE": np.mean(dMAE_list)})
-    return pd.DataFrame(rows).sort_values("delta_R2", ascending=False).reset_index(drop=True)
+        rows.append(
+            {
+                "group": gname,
+                "delta_R2": np.mean(dR2_list),
+                "delta_MAE": np.mean(dMAE_list),
+                "rel_delta_R2": np.mean(dR2_list) / R2_base if R2_base != 0 else np.nan,
+                "rel_delta_MAE": (
+                    np.mean(dMAE_list) / MAE_base if MAE_base != 0 else np.nan
+                ),
+                "delta_R2_std": np.std(dR2_list, ddof=1),
+                "delta_MAE_std": np.std(dMAE_list, ddof=1),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values("delta_R2", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def _block_permute_col(X_df, col_idx, block_len, rng):
@@ -738,22 +842,20 @@ def _block_permute_col(X_df, col_idx, block_len, rng):
     len(X_perm) == len(X)
     True
     sorted(X_perm["a"].tolist()) == list(range(10))  # Werte erhalten, Reihenfolge verändert
-    True  
+    True
     """
     Xp = X_df.copy(deep=True)
     n = len(Xp)
     # Indizes in Blöcke partitionieren
-    blocks = [np.arange(i, min(i+block_len, n)) for i in range(0, n, block_len)]
+    blocks = [np.arange(i, min(i + block_len, n)) for i in range(0, n, block_len)]
     order = rng.permutation(len(blocks))
     new_idx = np.concatenate([blocks[i] for i in order])
     Xp.iloc[:, col_idx] = Xp.iloc[new_idx, col_idx].to_numpy()
     return Xp
 
+
 def _fold_normalize(
-    df: pd.DataFrame,
-    fold_col: str,
-    value_col: str,
-    rel_col: str = "rel_value"
+    df: pd.DataFrame, fold_col: str, value_col: str, rel_col: str = "rel_value"
 ) -> pd.DataFrame:
     """
     Normiert Importanzwerte pro Fold so, dass die Summe je Fold = 1 ist.
@@ -796,11 +898,12 @@ def _fold_normalize(
     out[rel_col] = (out[value_col] / sums).fillna(0.0)
     return out
 
+
 def run_explain_over_splits(
     X_df: pd.DataFrame,
     y: np.ndarray,
-    make_model,                    # callable -> unfit model (EN/RF/...)
-    shap_kind: str = "auto",       # "linear", "tree", "auto"
+    make_model,  # callable -> unfit model (EN/RF/...)
+    shap_kind: str = "auto",  # "linear", "tree", "auto"
     compute_shap: bool = True,
     compute_pi: bool = True,
     n_splits: int = 5,
@@ -874,7 +977,7 @@ def run_explain_over_splits(
     - Gruppen-PI erwartet CONFIG["feature_groups"] als Mapping {gruppe: [features]} (z. B. COARSE_GROUPS oder DAY_NIGHT_GROUPS).
     - Für 100%-Plots: pro Fold die Gruppen-Importanzen relativieren (Summe = 1), dann über Folds/Personen mitteln (Median + IQR).
     - SHAP/PI werden für 100%-Darstellungen fold-normalisiert (Summe je Fold = 1):
-        SHAP: rel_mean_abs_shap; PI: rel_delta_R2. 
+        SHAP: rel_mean_abs_shap; PI: rel_delta_R2.
         Die Summary-Tabellen basieren auf Medianen dieser relativen Werte, was robuste, vergleichbare Aggregation
         über Folds (und später über Personen) erlaubt.
 
@@ -904,11 +1007,11 @@ def run_explain_over_splits(
     pi_group_rows = []
 
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = preprocess_train_only()                          # <<< statt preprocess_pipeline
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])               # train-only fit
+        pp = preprocess_train_only()  # <<< statt preprocess_pipeline
+        Xt_tr = pp.fit_transform(X_df.iloc[tr])  # train-only fit
         Xt_te = pp.transform(X_df.iloc[te])
 
-        if fixed_scaler is not None:                          # <<< Fix-Scaler anwenden (nur transform)
+        if fixed_scaler is not None:  # <<< Fix-Scaler anwenden (nur transform)
             Xt_tr = fixed_scaler.transform(Xt_tr)
             Xt_te = fixed_scaler.transform(Xt_te)
 
@@ -920,16 +1023,18 @@ def run_explain_over_splits(
         y_hat = model.predict(Xt_te)
         R2 = r2_score(y[te], y_hat)
         MAE = mean_absolute_error(y[te], y_hat)
-        fold_rows.append({
-            "fold": fold_id,
-            "r2": float(R2),
-            "mae": float(MAE),
-            "n_train": int(len(tr)),
-            "n_test": int(len(te)),
-            "train_end_idx": int(tr[-1]),
-            "test_start_idx": int(te[0]),
-            "test_end_idx": int(te[-1]),
-        })
+        fold_rows.append(
+            {
+                "fold": fold_id,
+                "r2": float(R2),
+                "mae": float(MAE),
+                "n_train": int(len(tr)),
+                "n_test": int(len(te)),
+                "train_end_idx": int(tr[-1]),
+                "test_start_idx": int(te[0]),
+                "test_end_idx": int(te[-1]),
+            }
+        )
 
         # --- SHAP
         if compute_shap:
@@ -953,12 +1058,14 @@ def run_explain_over_splits(
             mean_abs = np.abs(shap_vals).mean(axis=0)
             mean_signed = np.asarray(shap_vals).mean(axis=0)
             for f, a, s in zip(cols, mean_abs, mean_signed):
-                shap_rows.append({
-                    "fold": fold_id,
-                    "feature": f,
-                    "mean_abs_shap": float(a),
-                    "mean_signed_shap": float(s),
-                })
+                shap_rows.append(
+                    {
+                        "fold": fold_id,
+                        "feature": f,
+                        "mean_abs_shap": float(a),
+                        "mean_signed_shap": float(s),
+                    }
+                )
 
         # --- Permutation Importance – auf Testfenster pro Block pro Feture
         if compute_pi:
@@ -970,54 +1077,65 @@ def run_explain_over_splits(
             for j, col in enumerate(cols):
                 dR2_list, dMAE_list = [], []
                 for _ in range(n_repeats):
-                    Xp = _block_permute_col(Xt_te, j, block_len=CONFIG["pi"]["block_len"], rng=rng) 
+                    Xp = _block_permute_col(
+                        Xt_te, j, block_len=CONFIG["pi"]["block_len"], rng=rng
+                    )
                     y_hat_p = model.predict(Xp)
                     dR2_list.append(R2_base - r2_score(y[te], y_hat_p))
                     dMAE_list.append(mean_absolute_error(y[te], y_hat_p) - MAE_base)
-                pi_rows.append({
-                    "fold": fold_id,
-                    "feature": str(col).split("__")[-1],
-                    "delta_R2": float(np.mean(dR2_list)),
-                    "delta_MAE": float(np.mean(dMAE_list)),
-                })
+                pi_rows.append(
+                    {
+                        "fold": fold_id,
+                        "feature": str(col).split("__")[-1],
+                        "delta_R2": float(np.mean(dR2_list)),
+                        "delta_MAE": float(np.mean(dMAE_list)),
+                        "rel_delta_R2": (
+                            float(np.mean(dR2_list) / R2_base)
+                            if R2_base != 0
+                            else np.nan
+                        ),
+                        "rel_delta_MAE": (
+                            float(np.mean(dMAE_list) / MAE_base)
+                            if MAE_base != 0
+                            else np.nan
+                        ),
+                    }
+                )
         # --- Gruppenweise Permutation Importance (blockweise)
-      
+
         df_pi_groups = permutation_importance_by_group(
             fitted_estimator=model,
             X_test=Xt_te,
             y_test=y[te],
-            groups= CONFIG["feature_groups"], # TODO: into fun args?
+            groups=CONFIG["feature_groups"],  # TODO: into fun args?
             n_repeats=CONFIG["pi"]["n_repeats"],
             block_len=CONFIG["pi"]["block_len"],
             random_state=CONFIG["random_state"],
         )
-
-        # Relativierung auf 100 % (delta_R2)
-        total = df_pi_groups["delta_R2"].sum()
-        if total > 0:
-            df_pi_groups["rel_delta_R2"] = df_pi_groups["delta_R2"] / total
-        else:
-            df_pi_groups["rel_delta_R2"] = 0.0
-
-        # (delta_MAE)
-        total = df_pi_groups["delta_MAE"].sum()
-        if total > 0:
-            df_pi_groups["rel_delta_MAE"] = df_pi_groups["delta_MAE"] / total
-        else:
-            df_pi_groups["rel_delta_MAE"] = 0.0
+        df_pi_groups["fold"] = fold_id
         pi_group_rows.extend(df_pi_groups.to_dict(orient="records"))
 
     # Ergebnisse zusammenfassen
     fold_metrics_df = pd.DataFrame(fold_rows)
 
     shap_folds_df = pd.DataFrame(shap_rows) if compute_shap else None
-    shap_summary_df = (shap_folds_df.groupby("feature")[["mean_abs_shap","mean_signed_shap"]]
-                       .median().sort_values("mean_abs_shap", ascending=False).reset_index()
-                       ) if compute_shap and not shap_folds_df.empty else None
+    shap_summary_df = (
+        (
+            shap_folds_df.groupby("feature")[["mean_abs_shap", "mean_signed_shap"]]
+            .median()
+            .sort_values("mean_abs_shap", ascending=False)
+            .reset_index()
+        )
+        if compute_shap and not shap_folds_df.empty
+        else None
+    )
 
     if compute_shap and shap_folds_df is not None and not shap_folds_df.empty:
         shap_folds_df = _fold_normalize(
-            shap_folds_df, fold_col="fold", value_col="mean_abs_shap", rel_col="rel_mean_abs_shap"
+            shap_folds_df,
+            fold_col="fold",
+            value_col="mean_abs_shap",
+            rel_col="rel_mean_abs_shap",
         )
         shap_summary_df = (
             shap_folds_df.groupby("feature")[["rel_mean_abs_shap", "mean_signed_shap"]]
@@ -1029,37 +1147,34 @@ def run_explain_over_splits(
         shap_summary_df = None
 
     pi_folds_df = pd.DataFrame(pi_rows) if compute_pi else None
-    pi_summary_df = (pi_folds_df.groupby("feature")[["delta_R2","delta_MAE"]]
-                     .median().sort_values("delta_R2", ascending=False).reset_index()
-                     ) if compute_pi and not pi_folds_df.empty else None
-    
-    if compute_pi and pi_folds_df is not None and not pi_folds_df.empty:
-        pi_folds_df = _fold_normalize(
-            pi_folds_df, fold_col="fold", value_col="delta_R2", rel_col="rel_delta_R2"
-        )
-        pi_summary_df = (
-            pi_folds_df.groupby("feature")[["rel_delta_R2", "delta_MAE"]]
+    pi_summary_df = (
+        (
+            pi_folds_df.groupby("feature")[
+                ["rel_delta_MAE", "rel_delta_R2", "delta_R2", "delta_MAE"]
+            ]
             .median()
-            .sort_values("rel_delta_R2", ascending=False)
+            .sort_values("rel_delta_MAE", ascending=False)
             .reset_index()
         )
-    else:
-        pi_summary_df = None
+        if compute_pi and not pi_folds_df.empty
+        else None
+    )
 
     pi_groups_folds_df = pd.DataFrame(pi_group_rows) if compute_pi else None
-    pi_groups_summary_df = (pi_groups_folds_df.groupby("group")[["delta_R2","delta_MAE","rel_delta_R2"]]
-                            .median().sort_values("delta_R2", ascending=False).reset_index()
-                            ) if compute_pi and pi_groups_folds_df is not None and not pi_groups_folds_df.empty else None
-    
-    if compute_pi and pi_groups_folds_df is not None and not pi_groups_folds_df.empty:
-        pi_groups_summary_df = (
-            pi_groups_folds_df.groupby("group")[["rel_delta_R2", "delta_R2", "delta_MAE"]]
+    pi_groups_summary_df = (
+        (
+            pi_groups_folds_df.groupby("group")[
+                ["rel_delta_MAE", "rel_delta_R2", "delta_R2", "delta_MAE"]
+            ]
             .median()
-            .sort_values("rel_delta_R2", ascending=False)
+            .sort_values("rel_delta_MAE", ascending=False)
             .reset_index()
         )
-    else:
-        pi_groups_summary_df = None
+        if compute_pi
+        and pi_groups_folds_df is not None
+        and not pi_groups_folds_df.empty
+        else None
+    )
 
     return {
         "fold_metrics_df": fold_metrics_df,
@@ -1068,45 +1183,73 @@ def run_explain_over_splits(
         "pi_folds_df": pi_folds_df,
         "pi_summary_df": pi_summary_df,
         "pi_groups_folds_df": pi_groups_folds_df,
-        "pi_groups_summary_df": pi_groups_summary_df, 
+        "pi_groups_summary_df": pi_groups_summary_df,
     }
 
+
 # Save-Helper für die Ergebnisse aus run_explain_over_splits
-def save_explain_outputs(res_dict: dict, results_dir: str, pseudonym: str, model_tag: str):
+def save_explain_outputs(
+    res_dict: dict, results_dir: str, pseudonym: str, model_tag: str
+):
     os.makedirs(results_dir, exist_ok=True)
 
     # Folds-Metriken
     fm = res_dict.get("fold_metrics_df", None)
     if fm is not None and not fm.empty:
-        fm.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_fold_metrics.csv"), index=False)
+        fm.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_fold_metrics.csv"),
+            index=False,
+        )
 
     # SHAP
     sf = res_dict.get("shap_folds_df", None)
     ss = res_dict.get("shap_summary_df", None)
     if sf is not None and not sf.empty:
-        sf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_folds.csv"), index=False)
+        sf.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_folds.csv"),
+            index=False,
+        )
     if ss is not None and not ss.empty:
-        ss.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_summary.csv"), index=False)
+        ss.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_summary.csv"),
+            index=False,
+        )
 
     # Permutation Importance
     pf = res_dict.get("pi_folds_df", None)
     ps = res_dict.get("pi_summary_df", None)
     if pf is not None and not pf.empty:
-        pf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_folds.csv"), index=False)
+        pf.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_folds.csv"),
+            index=False,
+        )
     if ps is not None and not ps.empty:
-        ps.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_summary.csv"), index=False)
+        ps.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_feat_summary.csv"),
+            index=False,
+        )
 
     # Grouped Permutation Importance
     pgf = res_dict.get("pi_groups_folds_df", None)
     pgs = res_dict.get("pi_groups_summary_df", None)
     if pgf is not None and not pgf.empty:
-        pgf.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_group_folds.csv"), index=False)
+        pgf.to_csv(
+            os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_group_folds.csv"),
+            index=False,
+        )
     if pgs is not None and not pgs.empty:
-        pgs.to_csv(os.path.join(results_dir, f"{pseudonym}_{model_tag}_perm_group_summary.csv"), index=False)
+        pgs.to_csv(
+            os.path.join(
+                results_dir, f"{pseudonym}_{model_tag}_perm_group_summary.csv"
+            ),
+            index=False,
+        )
+
 
 def days_since_start(group):
     start_date = group["timestamp_utc"].min()
     return (group["timestamp_utc"] - start_date).dt.days
+
 
 # %% Main Processing Function ===================================================
 def process_participants(df_raw, pseudonyms, target_column):
@@ -1116,7 +1259,9 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
     df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
-    df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(days_since_start)
+    df_raw["day_since_start"] = df_raw.groupby("pseudonym", group_keys=False).apply(
+        days_since_start
+    )
 
     ensure_results_dir()
 
@@ -1124,7 +1269,11 @@ def process_participants(df_raw, pseudonyms, target_column):
         print(f"Processing {pseudonym}")
         df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365].copy()
         df_participant_timeaware = df_participant.set_index("timestamp_utc").copy()
-        y_rolling_mean = df_participant_timeaware[target_column].rolling(window=timedelta(days=14)).mean()
+        y_rolling_mean = (
+            df_participant_timeaware[target_column]
+            .rolling(window=timedelta(days=14))
+            .mean()
+        )
 
         rmssd_phq2 = compute_rmssd(df_participant[PHQ2_COLUMN].values)
         rmssd_values_phq2.append(rmssd_phq2)
@@ -1157,9 +1306,11 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("baseline R2 =", r2_score(y_test, dum.predict(X_test_df)))
 
         # Startfenster, Fix-Scaler fitten & EN-Hyperparameter bestimmen
-        init_end = split_initial_window(n_samples=n,                          
-                                        frac=CONFIG["init_frac_for_hp"],
-                                        min_train_size=CONFIG["shap"]["min_train_size"])
+        init_end = split_initial_window(
+            n_samples=n,
+            frac=CONFIG["init_frac_for_hp"],
+            min_train_size=CONFIG["shap"]["min_train_size"],
+        )
 
         # Train-only Preprocessing (Imputation, per-Feature-Scaler) auf Startfenster
         pp_train_only = preprocess_train_only()
@@ -1183,9 +1334,8 @@ def process_participants(df_raw, pseudonyms, target_column):
         )
         en_cv.fit(X_init_for_cv, y[:init_end])
         best_alpha = float(en_cv.alpha_)
-        best_l1    = float(getattr(en_cv, "l1_ratio_", CONFIG["en"]["l1_ratio"]))
+        best_l1 = float(getattr(en_cv, "l1_ratio_", CONFIG["en"]["l1_ratio"]))
         print(f"[Init-HP] EN alpha={best_alpha:.4g}, l1_ratio={best_l1}")
-
 
         # =================== ELASTIC NET: (fixe HP aus Startfenster) + SHAP ====================
         print("[EN] Fit mit fixen HP (aus Startfenster) ...")
@@ -1193,10 +1343,10 @@ def process_participants(df_raw, pseudonyms, target_column):
         # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
         pp_en = preprocess_train_only()
         Xt_train_en = pp_en.fit_transform(X_train_df)
-        Xt_test_en  = pp_en.transform(X_test_df)
+        Xt_test_en = pp_en.transform(X_test_df)
         if fixed_scaler is not None:
             Xt_train_en = fixed_scaler.transform(Xt_train_en)
-            Xt_test_en  = fixed_scaler.transform(Xt_test_en)
+            Xt_test_en = fixed_scaler.transform(Xt_test_en)
 
         # --- MODELL: ElasticNet mit fixen HP aus dem Startfenster
         model_en = ElasticNet(
@@ -1222,17 +1372,25 @@ def process_participants(df_raw, pseudonyms, target_column):
             out = expl(Xt_test_en)
             en_shap_values = getattr(out, "values", out)
 
-        print(f"EN R2={r2_elastic}, MAE={mae_elastic}, alpha={best_alpha}, l1_ratio={best_l1}")
+        print(
+            f"EN R2={r2_elastic}, MAE={mae_elastic}, alpha={best_alpha}, l1_ratio={best_l1}"
+        )
         print("EN # nonzero betas:", np.count_nonzero(model_en.coef_))
         print("mean(|SHAP|):", float(np.nanmean(np.abs(en_shap_values))))
 
         # Feature-Namen (falls DataFrame-DesignMatrix)
-        en_feat_names = [str(c).split('__')[-1] for c in list(getattr(X_train_df, 'columns', []))] or [f"f{i}" for i in range(Xt_test_en.shape[1])]
-        plot_shap_summary_and_bar(RESULTS_DIR, en_shap_values, Xt_test_en, en_feat_names, f"{pseudonym}_EN")
+        en_feat_names = [
+            str(c).split("__")[-1] for c in list(getattr(X_train_df, "columns", []))
+        ] or [f"f{i}" for i in range(Xt_test_en.shape[1])]
+        plot_shap_summary_and_bar(
+            RESULTS_DIR, en_shap_values, Xt_test_en, en_feat_names, f"{pseudonym}_EN"
+        )
 
         # Modelle speichern
-        joblib.dump({"pre": pp_en, "scaler": fixed_scaler, "model": model_en},
-                    os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"))
+        joblib.dump(
+            {"pre": pp_en, "scaler": fixed_scaler, "model": model_en},
+            os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"),
+        )
 
         # ================= RANDOM FOREST: GridSearch NUR im Startfenster (+ fix) ====================
         print("[RF] GridSearchCV (TimeSeriesSplit) NUR Startfenster ...")
@@ -1242,9 +1400,9 @@ def process_participants(df_raw, pseudonyms, target_column):
         if fixed_scaler is not None:
             X_rf_tr = fixed_scaler.transform(X_rf_tr)
 
-        rf_search_est = Pipeline([
-            ("model", RandomForestRegressor(random_state=RANDOM_STATE))
-        ])
+        rf_search_est = Pipeline(
+            [("model", RandomForestRegressor(random_state=RANDOM_STATE))]
+        )
         rf_gs = GridSearchCV(
             estimator=rf_search_est,
             param_grid=CONFIG["rf"]["param_grid"],
@@ -1259,17 +1417,21 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("[Init-HP] RF best:", rf_best_params)
 
         rf_best_params_plain = {
-            k.split("__", 1)[1]: v for k, v in rf_best_params.items() if k.startswith("model__")
+            k.split("__", 1)[1]: v
+            for k, v in rf_best_params.items()
+            if k.startswith("model__")
         }
-        
+
         rf_pre_fold = preprocess_train_only()
         Xt_train_rf = rf_pre_fold.fit_transform(X_train_df)
-        Xt_test_rf  = rf_pre_fold.transform(X_test_df)
+        Xt_test_rf = rf_pre_fold.transform(X_test_df)
         if fixed_scaler is not None:
             Xt_train_rf = fixed_scaler.transform(Xt_train_rf)
-            Xt_test_rf  = fixed_scaler.transform(Xt_test_rf)
+            Xt_test_rf = fixed_scaler.transform(Xt_test_rf)
 
-        model_rf = RandomForestRegressor(random_state=RANDOM_STATE, **rf_best_params_plain)
+        model_rf = RandomForestRegressor(
+            random_state=RANDOM_STATE, **rf_best_params_plain
+        )
         model_rf.fit(Xt_train_rf, y_train)
 
         y_pred_rf = model_rf.predict(Xt_test_rf)
@@ -1278,28 +1440,69 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         rf_explainer = shap.TreeExplainer(model_rf)
         rf_shap_values = rf_explainer.shap_values(Xt_test_rf)
-        rf_feat_names = [str(c).split("__")[-1] for c in list(getattr(X_train_df, 'columns', []))] or [f"f{i}" for i in range(Xt_test_rf.shape[1])]
-        plot_shap_summary_and_bar(RESULTS_DIR, rf_shap_values, Xt_test_rf, rf_feat_names, f"{pseudonym}_RF")
+        rf_feat_names = [
+            str(c).split("__")[-1] for c in list(getattr(X_train_df, "columns", []))
+        ] or [f"f{i}" for i in range(Xt_test_rf.shape[1])]
+        plot_shap_summary_and_bar(
+            RESULTS_DIR, rf_shap_values, Xt_test_rf, rf_feat_names, f"{pseudonym}_RF"
+        )
 
-        print(f"RF R2={r2_rf}, MAE={mae_rf}, n_estimators={model_rf.n_estimators}, max_depth={model_rf.max_depth}, min_samples_leaf={model_rf.min_samples_leaf}")
+        print(
+            f"RF R2={r2_rf}, MAE={mae_rf}, n_estimators={model_rf.n_estimators}, max_depth={model_rf.max_depth}, min_samples_leaf={model_rf.min_samples_leaf}"
+        )
         print("mean(|SHAP|):", float(np.nanmean(np.abs(rf_shap_values))))
         # Modelle speichern
-        joblib.dump({"pre": rf_pre_fold, "scaler": fixed_scaler, "model": model_rf},
-                    os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"))
+        joblib.dump(
+            {"pre": rf_pre_fold, "scaler": fixed_scaler, "model": model_rf},
+            os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"),
+        )
 
         # ==================== Parity Plots & Zeitreihen-Plots ==================
-        evaluate_and_plot_parity(RESULTS_DIR, y_test, y_pred_en, r2_elastic, mae_elastic, pseudonym, "elasticnet", "01")
-        evaluate_and_plot_parity(RESULTS_DIR, y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03")
+        evaluate_and_plot_parity(
+            RESULTS_DIR,
+            y_test,
+            y_pred_en,
+            r2_elastic,
+            mae_elastic,
+            pseudonym,
+            "elasticnet",
+            "01",
+        )
+        evaluate_and_plot_parity(
+            RESULTS_DIR, y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03"
+        )
 
         # Für Zeitreihen-Plot Roh/Pred (optional: nur Holdout anzeigen)
-        timestamps_model = df_participant.loc[mask_valid, "timestamp_utc"].astype(str).tolist()
+        timestamps_model = (
+            df_participant.loc[mask_valid, "timestamp_utc"].astype(str).tolist()
+        )
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
             "phq2_raw": y.tolist(),
             "train_mask": [i < split for i in range(n)],
             "test_mask": [i >= split for i in range(n)],
-            "elastic": {"pred": list(model_en.predict(fixed_scaler.transform(pp_en.transform(X)) if fixed_scaler else pp_en.transform(X))), "lower": None, "upper": None},
-            "rf": {"pred": list(model_rf.predict(fixed_scaler.transform(rf_pre_fold.transform(X)) if fixed_scaler else rf_pre_fold.transform(X))), "lower": None, "upper": None},
+            "elastic": {
+                "pred": list(
+                    model_en.predict(
+                        fixed_scaler.transform(pp_en.transform(X))
+                        if fixed_scaler
+                        else pp_en.transform(X)
+                    )
+                ),
+                "lower": None,
+                "upper": None,
+            },
+            "rf": {
+                "pred": list(
+                    model_rf.predict(
+                        fixed_scaler.transform(rf_pre_fold.transform(X))
+                        if fixed_scaler
+                        else rf_pre_fold.transform(X)
+                    )
+                ),
+                "lower": None,
+                "upper": None,
+            },
         }
 
         # ==================== Ergebnisse sammeln für ini Fold===============================
@@ -1328,10 +1531,12 @@ def process_participants(df_raw, pseudonyms, target_column):
         )
 
         res_en = run_explain_over_splits(
-            X_df=X, y=y,
+            X_df=X,
+            y=y,
             make_model=make_en,
             shap_kind="linear",
-            compute_shap=True, compute_pi=True,
+            compute_shap=True,
+            compute_pi=True,
             n_splits=CONFIG["shap"]["n_splits"],
             test_size=CONFIG["shap"]["test_size"],
             embargo=CONFIG["shap"]["embargo"],
@@ -1341,20 +1546,30 @@ def process_participants(df_raw, pseudonyms, target_column):
             fixed_scaler=fixed_scaler,
         )
 
-
         print("  [RF] Rolling PI/SHAP ...")
 
         def make_rf():
             return RandomForestRegressor(
                 random_state=RANDOM_STATE,
-                **{k: rf_best_params[k] for k in ["n_estimators","max_depth","min_samples_leaf","max_features"] if k in rf_best_params}
+                **{
+                    k: rf_best_params[k]
+                    for k in [
+                        "n_estimators",
+                        "max_depth",
+                        "min_samples_leaf",
+                        "max_features",
+                    ]
+                    if k in rf_best_params
+                },
             )
-        
+
         res_rf = run_explain_over_splits(
-            X_df=X, y=y,
+            X_df=X,
+            y=y,
             make_model=make_rf,
             shap_kind="tree",
-            compute_shap=True, compute_pi=True,
+            compute_shap=True,
+            compute_pi=True,
             n_splits=CONFIG["shap"]["n_splits"],
             test_size=CONFIG["shap"]["test_size"],
             embargo=CONFIG["shap"]["embargo"],
@@ -1370,71 +1585,104 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # ============== Zusammenfassungs-Plots (Top-K) ==============
         # EN – SHAP/PI Bars
-        if res_en.get("shap_summary_df") is not None and not res_en["shap_summary_df"].empty:
+        if (
+            res_en.get("shap_summary_df") is not None
+            and not res_en["shap_summary_df"].empty
+        ):
             plot_importance_bars(
-                res_en["shap_summary_df"], "rel_mean_abs_shap",
+                res_en["shap_summary_df"],
+                "rel_mean_abs_shap",
                 title=f"{pseudonym} EN – SHAP (median über Folds)",
-                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_shap_summary_bar.png"),
-                top_k=TOP_K
+                outpath=os.path.join(
+                    RESULTS_DIR, f"{pseudonym}_EN_shap_summary_bar.png"
+                ),
+                top_k=TOP_K,
             )
-        if res_en.get("pi_summary_df") is not None and not res_en["pi_summary_df"].empty:
+        if (
+            res_en.get("pi_summary_df") is not None
+            and not res_en["pi_summary_df"].empty
+        ):
             plot_importance_bars(
-                res_en["pi_summary_df"], "rel_delta_R2",
+                res_en["pi_summary_df"],
+                "rel_delta_R2",
                 title=f"{pseudonym} EN – Permutation Importance ΔR² (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_pi_summary_bar.png"),
-                top_k=TOP_K
+                top_k=TOP_K,
             )
 
         # RF – SHAP/PI Bars
-        if res_rf.get("shap_summary_df") is not None and not res_rf["shap_summary_df"].empty:
+        if (
+            res_rf.get("shap_summary_df") is not None
+            and not res_rf["shap_summary_df"].empty
+        ):
             plot_importance_bars(
-                res_rf["shap_summary_df"], "rel_mean_abs_shap",
+                res_rf["shap_summary_df"],
+                "rel_mean_abs_shap",
                 title=f"{pseudonym} RF – SHAP (median über Folds)",
-                outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_shap_summary_bar.png"),
-                top_k=TOP_K
+                outpath=os.path.join(
+                    RESULTS_DIR, f"{pseudonym}_RF_shap_summary_bar.png"
+                ),
+                top_k=TOP_K,
             )
-        if res_rf.get("pi_summary_df") is not None and not res_rf["pi_summary_df"].empty:
+        if (
+            res_rf.get("pi_summary_df") is not None
+            and not res_rf["pi_summary_df"].empty
+        ):
             plot_importance_bars(
-                res_rf["pi_summary_df"], "rel_delta_R2",
+                res_rf["pi_summary_df"],
+                "rel_delta_R2",
                 title=f"{pseudonym} RF – Permutation Importance ΔR² (median über Folds)",
                 outpath=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_pi_summary_bar.png"),
-                top_k=TOP_K
+                top_k=TOP_K,
             )
 
         # ============== Folds auf PHQ-2 Zeitreihe ==============
         # timestamps passend zu X_df_valid / y_valid:
-        timestamps_valid = (df_participant
-                            .loc[df_participant[target_column].notna(), "timestamp_utc"]
-                            .reset_index(drop=True))
+        timestamps_valid = df_participant.loc[
+            df_participant[target_column].notna(), "timestamp_utc"
+        ].reset_index(drop=True)
 
         # EN-Folds
-        if res_en.get("fold_metrics_df") is not None and not res_en["fold_metrics_df"].empty:
+        if (
+            res_en.get("fold_metrics_df") is not None
+            and not res_en["fold_metrics_df"].empty
+        ):
             plot_folds_on_timeseries(
                 timestamps=timestamps_valid,
                 y_values=y,
                 fold_metrics_df=res_en["fold_metrics_df"],
-                out_path=os.path.join(RESULTS_DIR, f"{pseudonym}_EN_folds_timeseries.png"),
-                title=f"{pseudonym} – EN: Test-Fenster & Metriken"
+                out_path=os.path.join(
+                    RESULTS_DIR, f"{pseudonym}_EN_folds_timeseries.png"
+                ),
+                title=f"{pseudonym} – EN: Test-Fenster & Metriken",
             )
 
         # RF-Folds
-        if res_rf.get("fold_metrics_df") is not None and not res_rf["fold_metrics_df"].empty:
+        if (
+            res_rf.get("fold_metrics_df") is not None
+            and not res_rf["fold_metrics_df"].empty
+        ):
             plot_folds_on_timeseries(
                 timestamps=timestamps_valid,
                 y_values=y,
                 fold_metrics_df=res_rf["fold_metrics_df"],
-                out_path=os.path.join(RESULTS_DIR, f"{pseudonym}_RF_folds_timeseries.png"),
-                title=f"{pseudonym} – RF: Test-Fenster & Metriken"
+                out_path=os.path.join(
+                    RESULTS_DIR, f"{pseudonym}_RF_folds_timeseries.png"
+                ),
+                title=f"{pseudonym} – RF: Test-Fenster & Metriken",
             )
 
     return results, plot_data
+
 
 # %% Run the pipeline ===========================================================
 # Load dataset
 df_raw = pd.read_pickle(DATA_PATH)
 df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
 df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
-df_raw["day_since_start"] = df_raw.groupby("patient_id", group_keys=False).apply(days_since_start)
+df_raw["day_since_start"] = df_raw.groupby("patient_id", group_keys=False).apply(
+    days_since_start
+)
 
 df_raw = df_raw[["patient_id", "timestamp_utc", PHQ2_COLUMN] + FEATURES_TO_CONSIDER]
 
@@ -1466,8 +1714,12 @@ plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="elastic")
 plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="rf")
 
 plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "elastic")
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic", show_pred_ci=False)
-plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "elastic", show_pred_ci=False)
+plot_phq2_test_errors_from_results(
+    RESULTS_DIR, plot_data, "elastic", show_pred_ci=False
+)
+plot_phq2_test_errors_from_results(
+    RESULTS_DIR, plot_data, "elastic", show_pred_ci=False
+)
 
 plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "rf")
 plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf", show_pred_ci=False)

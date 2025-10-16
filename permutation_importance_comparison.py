@@ -237,6 +237,130 @@ def plot_categorical_grid(df_tidy, model_tag, out_png, feature_order=None):
     print(f"Saved: {out_png}")
 
 
+# Optional: a colorblind-friendly palette (Okabe–Ito, repeated if needed)
+OKABE_ITO = [
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#56B4E9",
+    "#F0E442",
+    "#000000",
+]
+
+
+def stacked_positive_relmae(
+    df_tidy,
+    model_tag,
+    out_png,
+    feature_order=None,  # pass shared order to align EN/RF
+    top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
+    highlight_top_n=3,  # visually emphasize top-N features overall
+    label_totals=True,  # print total per bar on top
+    sort_participants_by_total=True,  # sort participants by total height
+):
+    """
+    Stacked bar plot per participant with only positive relative MAE contributions.
+    - Aggregates median rel_delta_mae per (feature, pid)
+    - Clips negatives to zero
+    - No normalization (keeps absolute comparability)
+    - Labels total per participant
+    - Highlights globally top-N features with hatch + edgecolor
+    """
+    if df_tidy.empty:
+        print(f"No data for {model_tag}; skipping stacked bar.")
+        return
+
+    # 1) Aggregate to median per (feature, pid), clip to positive
+    agg = (
+        df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
+        .median()
+        .rename(columns={"rel_delta_mae": "rel_pos"})
+    )
+    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
+
+    # 2) Pivot to features x participants (sum in case multiple rows remain)
+    pivot = agg.pivot_table(
+        index="feature", columns="pid", values="rel_pos", aggfunc="sum"
+    ).fillna(0.0)
+
+    # 3) Optional: reduce to top-K features (by total positive contribution)
+    if top_k is not None and top_k < pivot.shape[0]:
+        totals_feat = pivot.sum(axis=1)
+        keep = totals_feat.sort_values(ascending=False).head(top_k).index
+        pivot = pivot.loc[keep]
+
+    # 4) Enforce feature order if provided; else order by total contribution
+    if feature_order is not None:
+        available = [f for f in feature_order if f in pivot.index]
+        pivot = pivot.reindex(available)
+    else:
+        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+
+    # 5) Optionally sort participants by total bar height (descending)
+    totals_pid = pivot.sum(axis=0)
+    if sort_participants_by_total:
+        pivot = pivot.loc[:, totals_pid.sort_values(ascending=False).index]
+        totals_pid = pivot.sum(axis=0)
+
+    # 6) Determine globally top-N features to highlight
+    global_feat_totals = pivot.sum(axis=1).sort_values(ascending=False)
+    highlighted = set(global_feat_totals.head(max(0, int(highlight_top_n))).index)
+
+    # 7) Plot
+    pids = pivot.columns.tolist()
+    features = pivot.index.tolist()
+    x = np.arange(len(pids))
+
+    fig, ax = plt.subplots(
+        figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
+    )
+
+    bottoms = np.zeros(len(pids))
+    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
+
+    bars_by_feat = {}
+    for i, feat in enumerate(features):
+        heights = pivot.loc[feat].values
+        is_highlight = feat in highlighted
+        bars = ax.bar(
+            x,
+            heights,
+            bottom=bottoms,
+            label=feat,
+            color=colors[i],
+            edgecolor="black" if is_highlight else None,
+            linewidth=1.2 if is_highlight else 0.0,
+            hatch="///" if is_highlight else None,
+        )
+        bars_by_feat[feat] = bars
+        bottoms += heights
+
+    # 8) Label totals on top (if any non-zero)
+    if label_totals:
+        for xi, total in zip(x, totals_pid.values):
+            if total > 0:
+                ax.text(xi, total, f"{total:.2f}", ha="center", va="bottom", fontsize=9)
+
+    # Axes and labels
+    ax.set_xticks(x)
+    ax.set_xticklabels(pids, rotation=45, ha="right")
+    ax.set_xlabel("Participant (pid)")
+    ax.set_ylabel("Relative feature importance (sum of positives)")
+    ax.set_title(
+        f"{model_tag}: Stacked positive relative feature importance per participant"
+    )
+
+    # Legend outside for readability
+    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_png}")
+
+
 # ---------------- MAIN: build shared order, then plot both models ----------------
 outputs = []
 
@@ -260,8 +384,22 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
 
 # Plot categorical (binned) heatmaps with the SAME y order
 for model, df in [("EN", df_en), ("RF", df_rf)]:
-    out = os.path.join(DATA_DIR, f"{model}_rel_importance_categorical.png")
+    out = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_categorical_heatmap.png")
     plot_categorical_grid(df, model, out, feature_order=shared_order)
     outputs.append(out)
 
-outputs
+for model, df in [("EN", df_en), ("RF", df_rf)]:
+    out = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_stacked_barplot.png")
+    stacked_positive_relmae(
+        df_tidy=df,
+        model_tag=model,
+        out_png=out,
+        feature_order=shared_order,
+        top_k=12,
+        highlight_top_n=3,  # hatch the 3 most important features globally
+        label_totals=True,
+        sort_participants_by_total=False,
+    )
+    outputs.append(out)
+
+print(outputs)

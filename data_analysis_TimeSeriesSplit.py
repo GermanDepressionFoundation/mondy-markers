@@ -29,8 +29,8 @@ CONFIG = {
     "random_state": 42,
     "top_k": 15,
     "paths": {
-        "data": "data/df_merged_v7.pickle",
-        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_test",
+        "data": "data/df_merged_dupsfree_v8.pickle",
+        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_debug2",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
@@ -42,6 +42,8 @@ CONFIG = {
     "init_frac_for_hp": 0.30,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
+    # Gap/Embargo in TimeSeriesSplit für CV
+    "cv_embargo" : 1,
     # globalen Scaler einmal im Startfenster fitten?
     "use_fixed_scaler": True,
     # Elastic Net
@@ -49,14 +51,12 @@ CONFIG = {
         "scoring": "r2",  # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
         "tune_l1_ratio": False,  # True: l1_ratio in [0.1, 0.5, 0.9] mit-tunen
         "l1_ratio": 0.5,
-        "max_iter": 50000,
-        "tol": 1e-2,
+        "max_iter": 100000,
+        "tol": 1e-3,
+        "y_min_var_init": 1e-3,  # min. Varianz im Startfenster (sonst erweitern)
         "param_grid": {
-            "model__alpha": list(
-                np.logspace(-3, 2, 12)
-            ),  # 0.000001 bis 10 weniger schrumpfen
+            "model__alpha": list(np.logspace(-6, 1, 80)),
         },
-        "en_l1_grid": [0.0, 0.1, 0.3, 0.5],
     },
     # Random Forest
     "rf": {
@@ -203,6 +203,12 @@ from plotting import (
     plot_phq2_timeseries_from_results,
     plot_shap_summary_and_bar,
     plot_timeseries_with_folds,
+)
+
+from utils import (
+    _r2_mae_baseline,
+    _topk,
+    _fmt_top_dict
 )
 
 
@@ -363,7 +369,7 @@ def preprocess_train_only():
 
 def fit_fixed_global_scaler(X_init: pd.DataFrame):
     """
-    Fit eines *globalen* StandardScalers auf dem Startfenster.
+    Fit eines *globalen* StandardScalers (only  mean-center) auf dem Startfenster.
 
     Dieser Scaler wird danach NICHT mehr refittet, sondern in allen Folds
     nur noch auf Train/Test angewandt. Damit werden Feature-Skalen über Zeit
@@ -382,10 +388,11 @@ def fit_fixed_global_scaler(X_init: pd.DataFrame):
     Notes
     -----
     - Leakage-sicher, da nur auf *frühen* Daten gefittet.
+    - Fix-Scaler mit nur mean-center --> β/SHAP vergleichbar bzgl-Zentrum
     - In späteren Folds wird *zuerst* train-only Preprocessing angewandt,
       *dann* dieser feste Scaler transformiert.
     """
-    scaler = StandardScaler()
+    scaler = StandardScaler(with_mean=True, with_std=False)
     scaler.fit(X_init)
     return scaler
 
@@ -418,6 +425,39 @@ def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> in
     import math
 
     return max(int(math.floor(frac * n_samples)), int(min_train_size))
+
+def ensure_var_in_init(y, init_end, min_var=1e-3, step_days=14, max_frac=0.5):
+    """
+    Erweitert das Startfenster iterativ, bis Var(y) >= min_var oder max_frac erreicht.
+
+    Wenn die Zielvarianz im Startfenster zu klein ist (Nullmodell-Risiko),
+    wird init_end in Schritten (step_days) erhöht, bis mindestens min_var
+    erreicht ist oder höchstens max_frac * len(y) genutzt wurden.
+
+    Parameters
+    ----------
+    y : array-like
+        Zielreihe (nach Maskierung, Länge = n).
+    init_end : int
+        Aktuelles Ende des Startfensters (exklusiv).
+    min_var : float
+        Minimale Varianzschwelle.
+    step_days : int
+        Schrittweite zur Erweiterung (Tage).
+    max_frac : float
+        Obergrenze als Anteil der Gesamtlänge.
+
+    Returns
+    -------
+    int
+        Neues init_end.
+    """
+    import numpy as np
+    n = len(y)
+    max_end = int(max_frac * n)
+    while np.var(y[:init_end]) < min_var and (init_end + step_days) <= max_end:
+        init_end += step_days
+    return init_end
 
 
 # %%  PERMUTATION-IMPORTANCE (modell-agnostisch) =========================
@@ -1266,15 +1306,11 @@ def process_participants(df_raw, pseudonyms, target_column):
     ensure_results_dir()
 
     for pseudonym in pseudonyms:
+        print("========================================")
         print(f"Processing {pseudonym}")
-        df_participant = df_raw[df_raw["pseudonym"] == pseudonym].iloc[:365].copy()
-        df_participant_timeaware = df_participant.set_index("timestamp_utc").copy()
-        y_rolling_mean = (
-            df_participant_timeaware[target_column]
-            .rolling(window=timedelta(days=14))
-            .mean()
-        )
-
+        print("========================================")
+        df_participant = df_raw[df_raw["pseudonym"] == pseudonym].copy()
+        print(f"[INFO] {pseudonym}: n_days={df_participant.shape[0]}")
         rmssd_phq2 = compute_rmssd(df_participant[PHQ2_COLUMN].values)
         rmssd_values_phq2.append(rmssd_phq2)
 
@@ -1312,6 +1348,14 @@ def process_participants(df_raw, pseudonyms, target_column):
             min_train_size=CONFIG["shap"]["min_train_size"],
         )
 
+        # # Startfenster ggf. erweitern, falls Var(y) zu klein ist
+        # init_end = ensure_var_in_init(
+        #     y, init_end,
+        #     min_var=CONFIG["en"].get("y_min_var_init", 1e-3),
+        #     step_days=14,           # kannst du bei Wochenlogik lassen
+        #     max_frac=0.5           # höchstens 50% der Serie fürs Startfenster
+        # )
+
         # Train-only Preprocessing (Imputation, per-Feature-Scaler) auf Startfenster
         pp_train_only = preprocess_train_only()
         X_init_tr = pp_train_only.fit_transform(X.iloc[:init_end])
@@ -1326,15 +1370,22 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         en_cv = ElasticNetCV(
             l1_ratio=CONFIG["en"]["l1_ratio"],
-            alphas=np.logspace(-3, 2, 50),
-            cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"]),
-            max_iter=200_000,
-            tol=1e-2,
+            alphas=CONFIG["en"]["param_grid"]["model__alpha"],
+            cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"], gap=CONFIG["cv_embargo"]),
+            max_iter=CONFIG["en"]["max_iter"],
+            tol=CONFIG["en"]["tol"],
             random_state=RANDOM_STATE,
         )
+
         en_cv.fit(X_init_for_cv, y[:init_end])
         best_alpha = float(en_cv.alpha_)
         best_l1 = float(getattr(en_cv, "l1_ratio_", CONFIG["en"]["l1_ratio"]))
+
+        ALPHA_CAP = 10.0
+        if best_alpha > ALPHA_CAP:
+            print(f"[Init] alpha {best_alpha:.4g} capped → {ALPHA_CAP}")
+            best_alpha = ALPHA_CAP
+
         print(f"[Init-HP] EN alpha={best_alpha:.4g}, l1_ratio={best_l1}")
 
         # =================== ELASTIC NET: (fixe HP aus Startfenster) + SHAP ====================
@@ -1363,6 +1414,70 @@ def process_participants(df_raw, pseudonyms, target_column):
         r2_elastic = round(r2_score(y_test, y_pred_en), 2)
         mae_elastic = round(mean_absolute_error(y_test, y_pred_en), 1)
 
+
+        # === DEBUG: ElasticNet Diagnose (direkt nach r2_elastic / mae_elastic) ===
+        def _is_near_const(arr, tol_var=1e-12):
+            return float(np.var(arr)) <= tol_var
+
+        nz = int(np.count_nonzero(model_en.coef_))
+        interc = float(model_en.intercept_)
+        pred_var = float(np.var(y_pred_en))
+        ytr_var = float(np.var(y_train))
+        yte_var = float(np.var(y_test))
+
+        print("[EN][DEBUG]",
+            f"nz-coef={nz}",
+            f"intercept={interc:.4g}",
+            f"best_alpha={best_alpha:.4g}",
+            f"best_l1={best_l1}",
+            f"var(y_train)={ytr_var:.4g}",
+            f"var(y_test)={yte_var:.4g}",
+            f"var(y_pred)={pred_var:.4g}",
+            f"R2={r2_elastic:.3f}",
+            f"MAE={mae_elastic:.3f}",
+        )
+
+        # Baseline zum Vergleich
+        y_pred_mean = np.full_like(y_test, fill_value=np.mean(y_train), dtype=float)
+        r2_base = r2_score(y_test, y_pred_mean)
+        mae_base = mean_absolute_error(y_test, y_pred_mean)
+        print("[EN][DEBUG] baseline(mean-of-train): R2={r2:.3f}, MAE={mae:.3f}".format(r2=r2_base, mae=mae_base))
+
+        # Checks & Hinweise
+        if nz == 0 and abs(interc) < 1e-8:
+            print("[EN][WARN] Nullmodell: alle Koeffizienten = 0 und Intercept ≈ 0 → konstante Vorhersage 0.")
+            print("           Ursachen: sehr großes alpha oder sehr geringe Varianz im Startfenster/Train.")
+
+        if _is_near_const(y_pred_en):
+            print("[EN][WARN] Vorhersagen sind (nahezu) konstant. var(y_pred)≈0.")
+            print("           Prüfe alpha-Raster (zu groß?), l1_ratio (zu lasso-lastig?),")
+            print("           bzw. Zielvarianz im Startfenster (ggf. Startfenster erweitern).")
+
+        if r2_elastic < r2_base:
+            print("[EN][INFO] Modell schlägt Baseline (Train-Mean) NICHT. Evtl. Underfitting/zu starke Regularisierung.")
+            print("           Tipp: feineres alpha (z.B. 1e-6..1e2), l1_ratio etwas ridge-iger (<=0.3),")
+            print("           oder Startfenster-Varianz prüfen/erweitern.")
+
+        # Extremwerte/Skalen sanity checks
+        print("[EN][DEBUG] y_train[min,max,mean]={:.3f},{:.3f},{:.3f} | y_test[min,max,mean]={:.3f},{:.3f},{:.3f} | y_pred[min,max,mean]={:.3f},{:.3f},{:.3f}".format(
+            float(np.min(y_train)), float(np.max(y_train)), float(np.mean(y_train)),
+            float(np.min(y_test)),  float(np.max(y_test)),  float(np.mean(y_test)),
+            float(np.min(y_pred_en)), float(np.max(y_pred_en)), float(np.mean(y_pred_en))
+        ))
+
+        # Optional: kleinste/niedrigste Standardabweichungen in den train-Features (nach Preprocessing)
+        try:
+            # Falls Xt_train_en ein numpy-Array ist
+            if not hasattr(Xt_train_en, "std"):
+                Xtr_std = np.std(Xt_train_en, axis=0)
+            else:
+                Xtr_std = Xt_train_en.std(axis=0)
+            min_std = float(np.min(Xtr_std))
+            n_zero_std = int(np.sum(np.isclose(Xtr_std, 0)))
+            print(f"[EN][DEBUG] Xt_train_en: min(std)={min_std:.3g}, #zero-std-cols={n_zero_std}")
+        except Exception as e:
+            print("[EN][DEBUG] Feature-Std-Check skipped:", repr(e))
+                    
         # --- SHAP auf preprocessed Matrizen
         try:
             en_explainer = shap.LinearExplainer(model_en, Xt_train_en)
@@ -1469,7 +1584,14 @@ def process_participants(df_raw, pseudonyms, target_column):
             "01",
         )
         evaluate_and_plot_parity(
-            RESULTS_DIR, y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03"
+            RESULTS_DIR, 
+            y_test, 
+            y_pred_rf, 
+            r2_rf, 
+            mae_rf, 
+            pseudonym, 
+            "rf", 
+            "03"
         )
 
         # Für Zeitreihen-Plot Roh/Pred (optional: nur Holdout anzeigen)

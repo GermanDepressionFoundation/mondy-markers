@@ -36,26 +36,24 @@ CONFIG = {
         "phq2": "abend_PHQ2_sum",
         "phq9": "woche_PHQ9_sum",
     },
-    # 70:30 chronologischer Holdout
-    "holdout_test_frac": 0.70,
     # Anteil Startfenster für HP-Tuning und Fix-Scaler-Fit
-    "init_frac_for_hp": 0.30,
+    "init_frac_for_hp": 0.70,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
     # Gap/Embargo in TimeSeriesSplit für CV
-    "cv_embargo" : 1,
+    "cv_embargo": 1,
     # globalen Scaler einmal im Startfenster fitten?
     "use_fixed_scaler": True,
     # Elastic Net
     "en": {
         "scoring": "r2",  # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
         "tune_l1_ratio": False,  # True: l1_ratio in [0.1, 0.5, 0.9] mit-tunen
-        "l1_ratio": 0.5,
         "max_iter": 100000,
         "tol": 1e-3,
         "y_min_var_init": 1e-3,  # min. Varianz im Startfenster (sonst erweitern)
         "param_grid": {
             "model__alpha": list(np.logspace(-6, 1, 80)),
+            "model__l1_ratio": [0.1, 0.5, 0.9],
         },
     },
     # Random Forest
@@ -101,6 +99,7 @@ with open(
 # DEFS
 DATA_PATH = CONFIG["paths"]["data"]
 RESULTS_DIR = CONFIG["paths"]["results_dir"]
+LOAD_CACHED_RESULTS = False
 CACHE_RESULTS_PATH = CONFIG["paths"]["cache_results"]
 TOP_K = CONFIG["top_k"]
 RANDOM_STATE = CONFIG["random_state"]
@@ -205,12 +204,6 @@ from plotting import (
     plot_timeseries_with_folds,
 )
 
-from utils import (
-    _r2_mae_baseline,
-    _topk,
-    _fmt_top_dict
-)
-
 
 # %% Utility and Pipeline Functions ============================================
 def ensure_results_dir():
@@ -255,31 +248,6 @@ pre_scalers = ColumnTransformer(
 )
 
 
-def preprocess_pipeline():
-    # Imputer -> per-Feature-Scaler -> globale z-Skalierung -> finaler Imputer (0.0)
-    return Pipeline(
-        [
-            (
-                "imputer",
-                IterativeImputer(
-                    max_iter=50,
-                    tol=1e-2,
-                    n_nearest_features=30,
-                    random_state=RANDOM_STATE,
-                    # keep_empty_features=True,
-                ),
-            ),
-            # (
-            #     "meanimputer",
-            #     SimpleImputer(strategy="mean"),
-            # ),  # only do somthing if IterativeImputer produces NaNs
-            ("per_feature_scalers", pre_scalers),
-            ("scaler", StandardScaler()),
-            # ("final_imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-        ]
-    )
-
-
 def compute_rmssd(series):
     values = pd.Series(series).astype(float).to_numpy()
     diffs = np.diff(values)
@@ -292,37 +260,71 @@ def compute_rmssd(series):
 # %% ZEIT-SPLITS (Rolling-Origin, expanding) ============================
 def rolling_origin_splits(
     n_samples: int,
-    n_splits: int = 5,
     test_size: int = 30,
+    hp_train_frac: float = 0.3,  # fraction of samples used for initial training window
     embargo: int = 0,
-    min_train_size: int = 90,
+    step_train: int = 30,  # extend training window by 30 each split
+    min_test_size: int = 5,  # soft minimum; final split may be shorter
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
-    Expanding Window:
-      Fold 1: train[0 : T1] -> test[T1+embargo : T1+embargo+test_size]
-      Fold 2: train[0 : T2] -> test[T2+embargo : T2+embargo+test_size]
-      ...
+    Expanding Window with flexible number of splits.
+    The training window starts as a fraction (hp_train_frac) of the total samples
+    and grows by `step_train` per split.
+    The last split's test window always ends at n_samples.
+
+    Fold k:
+      train[0 : T_k] -> test[T_k + embargo : min(T_k + embargo + test_size, n_samples)]
     """
-    splits = []
-    max_last_test_end = n_samples - test_size
-    if max_last_test_end <= min_train_size:
+
+    splits: List[Tuple[np.ndarray, np.ndarray]] = []
+
+    # --- Compute base training size from fraction ---
+    base_train_size = int(round(hp_train_frac * n_samples))
+    if base_train_size < 1:
+        raise ValueError("hp_train_frac too small, results in empty training window.")
+    if n_samples <= base_train_size:
         return splits
-    train_ends = np.linspace(
-        min_train_size, max_last_test_end - embargo, n_splits, dtype=int
-    )
-    for tr_end in train_ends:
-        tr_idx = np.arange(0, tr_end)
+
+    tr_end = base_train_size
+
+    while True:
         start_test = tr_end + embargo
+        if start_test >= n_samples:
+            break  # no room left for test samples
+
+        # Cap test end at n_samples
         end_test = min(start_test + test_size, n_samples)
-        if end_test - start_test <= 0:
-            continue
+        is_last = end_test == n_samples
+
+        tr_idx = np.arange(0, tr_end)
         te_idx = np.arange(start_test, end_test)
-        if len(tr_idx) >= min_train_size and len(te_idx) >= 5:
+
+        # Add valid split
+        if len(te_idx) >= min_test_size or (is_last and len(te_idx) > 0):
             splits.append((tr_idx, te_idx))
+
+        if is_last:
+            break
+
+        # Grow training window for next iteration
+        tr_end += step_train
+
+        # Safety: if there’s not enough space left for another test fold
+        if tr_end + embargo >= n_samples:
+            # Add a final split that ends at n_samples if possible
+            start_test = min(tr_end + embargo, n_samples - 1)
+            if start_test < n_samples:
+                end_test = n_samples
+                tr_idx = np.arange(0, min(tr_end, n_samples))
+                te_idx = np.arange(start_test, end_test)
+                if len(te_idx) > 0:
+                    splits.append((tr_idx, te_idx))
+            break
+
     return splits
 
 
-def preprocess_train_only():
+def impute_pipeline():
     """
     Preprocessing-Schritte, die pro Fold auf dem Trainingsfenster gefittet werden.
 
@@ -353,48 +355,43 @@ def preprocess_train_only():
                     random_state=CONFIG["random_state"],
                     keep_empty_features=True,
                 ),
-            ),
-            (
-                "simple_imputer",
-                SimpleImputer(strategy="mean", keep_empty_features=True),
-            ),
-            (
-                "per_feature_scalers",
-                pre_scalers,
-            ),  # dein bestehender ColumnTransformer je Quelle
-            # KEIN globaler StandardScaler hier!
+            )
         ]
     )
 
 
-def fit_fixed_global_scaler(X_init: pd.DataFrame):
+def fit_fixed_global_scaler(
+    X_init_preprocessed: pd.DataFrame, include_global_center: bool = True
+) -> Pipeline:
     """
-    Fit eines *globalen* StandardScalers (only  mean-center) auf dem Startfenster.
-
-    Dieser Scaler wird danach NICHT mehr refittet, sondern in allen Folds
-    nur noch auf Train/Test angewandt. Damit werden Feature-Skalen über Zeit
-    konsistent und β/SHAP vergleichbar.
+    Build & fit a FIXED scaler pipeline on the initial window that includes:
+      - your per-feature ColumnTransformer `pre_scalers`
+      - optional global mean-centering (StandardScaler with_std=False)
 
     Parameters
     ----------
-    X_init : pandas.DataFrame
-        Featurematrix des Startfensters (nach train-only Preprocessing).
+    X_init_preprocessed : pd.DataFrame
+        The initial window AFTER train-only preprocessing (e.g., imputation).
+        This ensures the fixed scalers see a stable, leakage-safe representation.
+    include_global_center : bool, default True
+        If True, add a global StandardScaler(with_mean=True, with_std=False)
+        to center features consistently over time.
 
     Returns
     -------
-    sklearn.preprocessing.StandardScaler
-        Gefitteter StandardScaler (global, fix).
-
-    Notes
-    -----
-    - Leakage-sicher, da nur auf *frühen* Daten gefittet.
-    - Fix-Scaler mit nur mean-center --> β/SHAP vergleichbar bzgl-Zentrum
-    - In späteren Folds wird *zuerst* train-only Preprocessing angewandt,
-      *dann* dieser feste Scaler transformiert.
+    sklearn.pipeline.Pipeline
+        A fitted pipeline with steps:
+          [("per_feature_scalers", pre_scalers),
+           ("global_center", StandardScaler(with_mean=True, with_std=False))?]
+        Use .transform() ONLY in later folds (do not refit).
     """
-    scaler = StandardScaler(with_mean=True, with_std=False)
-    scaler.fit(X_init)
-    return scaler
+    steps = [("per_feature_scalers", pre_scalers)]
+    if include_global_center:
+        steps.append(("global_center", StandardScaler(with_mean=True, with_std=False)))
+
+    fixed_scaler = Pipeline(steps, verbose=False)
+    fixed_scaler.fit(X_init_preprocessed)
+    return fixed_scaler
 
 
 def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> int:
@@ -426,6 +423,7 @@ def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> in
 
     return max(int(math.floor(frac * n_samples)), int(min_train_size))
 
+
 def ensure_var_in_init(y, init_end, min_var=1e-3, step_days=14, max_frac=0.5):
     """
     Erweitert das Startfenster iterativ, bis Var(y) >= min_var oder max_frac erreicht.
@@ -453,6 +451,7 @@ def ensure_var_in_init(y, init_end, min_var=1e-3, step_days=14, max_frac=0.5):
         Neues init_end.
     """
     import numpy as np
+
     n = len(y)
     max_end = int(max_frac * n)
     while np.var(y[:init_end]) < min_var and (init_end + step_days) <= max_end:
@@ -503,10 +502,9 @@ def permutation_importance_per_feature(
 def run_feature_permutation_importance_over_splits(
     X_df: pd.DataFrame,
     y: np.ndarray,
-    n_splits: int,
     test_size: int,
+    hp_train_frac: float,
     embargo: int,
-    min_train_size: int,
     estimator: BaseEstimator,  # bereits mit finalen HP konfiguriert
     n_repeats: int = 50,
     agg: str = "mean",
@@ -515,15 +513,16 @@ def run_feature_permutation_importance_over_splits(
     n = len(y)
     splits = rolling_origin_splits(
         n_samples=n,
-        n_splits=n_splits,
         test_size=test_size,
+        hp_train_frac=hp_train_frac,
         embargo=embargo,
-        min_train_size=min_train_size,
+        step_train=30,
+        min_test_size=5,
     )
 
     all_rows = []
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = preprocess_pipeline()
+        pp = impute_pipeline()
         Xt_tr = pp.fit_transform(X_df.iloc[tr])
         Xt_te = pp.transform(X_df.iloc[te])
 
@@ -557,154 +556,6 @@ def run_feature_permutation_importance_over_splits(
         .reset_index()
     )
     return imp_folds, imp_summary
-
-
-# %% ROLLING SHAP (modell-agnostisch) ===================================
-def pick_shap_explainer(estimator: BaseEstimator, kind: str, Xt_train: pd.DataFrame):
-    """Wählt den passenden SHAP-Explainer."""
-    if kind == "linear":
-        return shap.LinearExplainer(estimator, Xt_train)
-    if kind == "tree":
-        return shap.TreeExplainer(estimator)
-    # auto
-    name = estimator.__class__.__name__.lower()
-    if (
-        "randomforest" in name
-        or "gradientboost" in name
-        or "xgb" in name
-        or "lgbm" in name
-    ):
-        return shap.TreeExplainer(estimator)
-    if "elasticnet" in name or "lasso" in name or "ridge" in name or "linear" in name:
-        return shap.LinearExplainer(estimator, Xt_train)
-    return shap.Explainer(estimator, Xt_train)
-
-
-def run_shap_over_splits(
-    X_df: pd.DataFrame,
-    y: np.ndarray,
-    n_splits: int,
-    test_size: int,
-    embargo: int,
-    min_train_size: int,
-    estimator: BaseEstimator,  # mit finalen HP konfiguriert
-    explainer_kind: str = "auto",  # "auto" | "linear" | "tree"
-    agg: str = "mean",
-    random_state: int = 42,
-):
-    splits = rolling_origin_splits(
-        n_samples=len(y),
-        n_splits=n_splits,
-        test_size=test_size,
-        embargo=embargo,
-        min_train_size=min_train_size,
-    )
-
-    rows = []
-    for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = preprocess_pipeline()
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])
-        Xt_te = pp.transform(X_df.iloc[te])
-
-        est = clone(estimator)
-        est.fit(Xt_tr, y[tr])
-
-        try:
-            explainer = pick_shap_explainer(est, explainer_kind, Xt_tr)
-            shap_vals = explainer.shap_values(Xt_te)
-        except Exception:
-            expl = shap.Explainer(est, Xt_tr)
-            out = expl(Xt_te)
-            shap_vals = getattr(out, "values", out)
-
-        cols = [str(c).split("__")[-1] for c in list(Xt_te.columns)]
-        mean_abs = np.abs(shap_vals).mean(axis=0)
-        mean_signed = shap_vals.mean(axis=0)
-        for f, a, s in zip(cols, mean_abs, mean_signed):
-            rows.append(
-                {
-                    "fold": fold_id,
-                    "feature": f,
-                    "mean_abs_shap": float(a),
-                    "mean_signed_shap": float(s),
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame(), pd.DataFrame()
-
-    shap_folds = pd.DataFrame(rows)
-    if agg == "median":
-        agg_fun = "median"
-    else:
-        agg_fun = "mean"
-
-    shap_summary = (
-        shap_folds.groupby("feature")[["mean_abs_shap", "mean_signed_shap"]]
-        .agg(agg_fun)
-        .sort_values("mean_abs_shap", ascending=False)
-        .reset_index()
-    )
-    return shap_folds, shap_summary
-
-
-def evaluate_over_splits(
-    X_df,
-    y,
-    make_model,
-    n_splits=5,
-    test_size=30,
-    embargo=0,
-    min_train_size=90,
-    timestamps=None,
-    model_label="model",
-):
-    """
-    Pro Fold: Preprocessing NUR auf Train fitten, Modell trainieren, auf Test bewerten.
-    Gibt DataFrame mit (fold, train_size, test_size, fold_end_idx/ts, R2, MAE,
-    R2_baseline_last, R2_baseline_mean) zurück.
-    """
-    splits = rolling_origin_splits(
-        n_samples=len(y),
-        n_splits=n_splits,
-        test_size=test_size,
-        embargo=embargo,
-        min_train_size=min_train_size,
-    )
-
-    rows = []
-    for fold_id, (tr, te) in enumerate(splits, 1):
-        pp = preprocess_pipeline()
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])
-        Xt_te = pp.transform(X_df.iloc[te])
-
-        model = make_model()
-        model.fit(Xt_tr, y[tr])
-        y_hat = model.predict(Xt_te)
-
-        # Naive Baselines (konstant)
-        y_base_last = np.full_like(y[te], fill_value=y[tr][-1], dtype=float)
-        y_base_mean = np.full_like(y[te], fill_value=np.mean(y[tr]), dtype=float)
-
-        rows.append(
-            {
-                "model": model_label,
-                "fold": fold_id,
-                "train_size": len(tr),
-                "test_size": len(te),
-                "fold_start_idx": int(te[0]),
-                "fold_end_idx": int(te[-1]),
-                "fold_end_ts": (
-                    str(timestamps[te[-1]]) if timestamps is not None else None
-                ),
-                "r2": float(r2_score(y[te], y_hat)),
-                "mae": float(mean_absolute_error(y[te], y_hat)),
-                "r2_baseline_last": float(r2_score(y[te], y_base_last)),
-                "r2_baseline_mean": float(r2_score(y[te], y_base_mean)),
-            }
-        )
-
-    return pd.DataFrame(rows)
 
 
 def permutation_importance_by_group(
@@ -946,13 +797,12 @@ def run_explain_over_splits(
     shap_kind: str = "auto",  # "linear", "tree", "auto"
     compute_shap: bool = True,
     compute_pi: bool = True,
-    n_splits: int = 5,
     test_size: int = 30,
+    hp_train_frac: float = 0.3,
     embargo: int = 0,
-    min_train_size: int = 90,
     n_repeats: int = 50,
     random_state: int = 42,
-    fixed_scaler: StandardScaler | None = None,
+    fixed_scaler: Pipeline | None = None,
 ):
     """
     Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
@@ -979,14 +829,10 @@ def run_explain_over_splits(
         Ob pro Fold SHAP-Werte auf dem Testfenster berechnet werden.
     compute_pi : bool, optional
         Ob pro Fold Permutation Importances berechnet werden (Feature-weise + Gruppen-weise).
-    n_splits : int, optional
-        Anzahl Rolling-Origin-Folds.
     test_size : int, optional
         Länge des Testfensters je Fold (in Tagen).
     embargo : int, optional
         Sicherheitslücke zwischen Train-Ende und Test-Start (Tage), um Leakage zu vermeiden.
-    min_train_size : int, optional
-        Minimale Trainingsfensterlänge (in Tagen).
     n_repeats : int, optional
         Wiederholungen pro Feature/Gruppe für PI (Monte-Carlo-Schätzung).
     random_state : int, optional
@@ -1034,10 +880,11 @@ def run_explain_over_splits(
 
     splits = rolling_origin_splits(
         n_samples=len(y),
-        n_splits=n_splits,
         test_size=test_size,
+        hp_train_frac=hp_train_frac,
         embargo=embargo,
-        min_train_size=min_train_size,
+        step_train=30,
+        min_test_size=5,
     )
 
     rng = np.random.default_rng(random_state)
@@ -1047,7 +894,7 @@ def run_explain_over_splits(
     pi_group_rows = []
 
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = preprocess_train_only()  # <<< statt preprocess_pipeline
+        pp = impute_pipeline()  # <<< statt preprocess_pipeline
         Xt_tr = pp.fit_transform(X_df.iloc[tr])  # train-only fit
         Xt_te = pp.transform(X_df.iloc[te])
 
@@ -1315,7 +1162,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         rmssd_values_phq2.append(rmssd_phq2)
 
         # --- Daten vorbereiten (nur gültige Zielwerte) ---
-        X, y, feature_names = prepare_data(df_participant, target_column)
+        X, y, _ = prepare_data(df_participant, target_column)
         mask_valid = np.isfinite(y)
         X = X.loc[mask_valid].reset_index(drop=True)
         y = np.asarray(y)[mask_valid]
@@ -1325,9 +1172,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             continue
 
         # --- Dummy Regressor ---
-        test_frac = CONFIG["init_frac_for_hp"]
+        train_frac = CONFIG["init_frac_for_hp"]
         gap = 0
-        split = int(round((1 - test_frac) * n))
+        split = int(round(train_frac * n))
         idx_train = np.arange(0, split - gap)
         idx_test = np.arange(split, n)
 
@@ -1336,31 +1183,15 @@ def process_participants(df_raw, pseudonyms, target_column):
         y_train = y[idx_train]
         y_test = y[idx_test]
 
-        print(f"{test_frac}:var(y_train) =", float(np.var(y_train)))
-        print(f"{1-test_frac}:var(y_test) =", float(np.var(y_test)))
+        print(f"{train_frac}:var(y_train) =", float(np.var(y_train)))
+        print(f"{1-train_frac}:var(y_test) =", float(np.var(y_test)))
         dum = DummyRegressor(strategy="mean").fit(X_train_df, y_train)
         print("baseline R2 =", r2_score(y_test, dum.predict(X_test_df)))
 
-        # Startfenster, Fix-Scaler fitten & EN-Hyperparameter bestimmen
-        init_end = split_initial_window(
-            n_samples=n,
-            frac=CONFIG["init_frac_for_hp"],
-            min_train_size=CONFIG["shap"]["min_train_size"],
-        )
+        # Train-only Preprocessing (Imputation) auf Startfenster
+        pp = impute_pipeline()
+        X_init_tr = pp.fit_transform(X_train_df)
 
-        # # Startfenster ggf. erweitern, falls Var(y) zu klein ist
-        # init_end = ensure_var_in_init(
-        #     y, init_end,
-        #     min_var=CONFIG["en"].get("y_min_var_init", 1e-3),
-        #     step_days=14,           # kannst du bei Wochenlogik lassen
-        #     max_frac=0.5           # höchstens 50% der Serie fürs Startfenster
-        # )
-
-        # Train-only Preprocessing (Imputation, per-Feature-Scaler) auf Startfenster
-        pp_train_only = preprocess_train_only()
-        X_init_tr = pp_train_only.fit_transform(X.iloc[:init_end])
-
-        # Optional: globalen StandardScaler nur im Startfenster fitten und einfrieren
         fixed_scaler = None
         if CONFIG["use_fixed_scaler"]:
             fixed_scaler = fit_fixed_global_scaler(X_init_tr)
@@ -1368,18 +1199,33 @@ def process_participants(df_raw, pseudonyms, target_column):
         else:
             X_init_for_cv = X_init_tr
 
-        en_cv = ElasticNetCV(
-            l1_ratio=CONFIG["en"]["l1_ratio"],
-            alphas=CONFIG["en"]["param_grid"]["model__alpha"],
-            cv=TimeSeriesSplit(n_splits=CONFIG["cv_n_splits"], gap=CONFIG["cv_embargo"]),
+        en = ElasticNet(
             max_iter=CONFIG["en"]["max_iter"],
             tol=CONFIG["en"]["tol"],
             random_state=RANDOM_STATE,
         )
 
-        en_cv.fit(X_init_for_cv, y[:init_end])
-        best_alpha = float(en_cv.alpha_)
-        best_l1 = float(getattr(en_cv, "l1_ratio_", CONFIG["en"]["l1_ratio"]))
+        param_grid = {
+            "alpha": CONFIG["en"]["param_grid"]["model__alpha"],
+            "l1_ratio": CONFIG["en"]["param_grid"]["model__l1_ratio"],
+        }
+
+        en_gs = GridSearchCV(
+            estimator=en,
+            param_grid=param_grid,
+            cv=TimeSeriesSplit(
+                n_splits=CONFIG["cv_n_splits"], gap=CONFIG["cv_embargo"]
+            ),
+            n_jobs=-1,
+            refit=True,
+            verbose=0,
+            scoring="r2",
+        )
+
+        en_gs.fit(X_init_for_cv, y_train)
+        best_params = en_gs.best_params_
+        best_alpha = float(best_params.get("alpha", best_params.get("model__alpha")))
+        best_l1 = float(best_params.get("l1_ratio", best_params.get("model__l1_ratio")))
 
         ALPHA_CAP = 10.0
         if best_alpha > ALPHA_CAP:
@@ -1392,12 +1238,9 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("[EN] Fit mit fixen HP (aus Startfenster) ...")
 
         # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
-        pp_en = preprocess_train_only()
-        Xt_train_en = pp_en.fit_transform(X_train_df)
-        Xt_test_en = pp_en.transform(X_test_df)
-        if fixed_scaler is not None:
-            Xt_train_en = fixed_scaler.transform(Xt_train_en)
-            Xt_test_en = fixed_scaler.transform(Xt_test_en)
+        Xt_train_en = X_init_for_cv
+        Xt_test_en = pp.transform(X_test_df)
+        Xt_test_en = fixed_scaler.transform(Xt_test_en)
 
         # --- MODELL: ElasticNet mit fixen HP aus dem Startfenster
         model_en = ElasticNet(
@@ -1414,7 +1257,6 @@ def process_participants(df_raw, pseudonyms, target_column):
         r2_elastic = round(r2_score(y_test, y_pred_en), 2)
         mae_elastic = round(mean_absolute_error(y_test, y_pred_en), 1)
 
-
         # === DEBUG: ElasticNet Diagnose (direkt nach r2_elastic / mae_elastic) ===
         def _is_near_const(arr, tol_var=1e-12):
             return float(np.var(arr)) <= tol_var
@@ -1425,7 +1267,8 @@ def process_participants(df_raw, pseudonyms, target_column):
         ytr_var = float(np.var(y_train))
         yte_var = float(np.var(y_test))
 
-        print("[EN][DEBUG]",
+        print(
+            "[EN][DEBUG]",
             f"nz-coef={nz}",
             f"intercept={interc:.4g}",
             f"best_alpha={best_alpha:.4g}",
@@ -1441,29 +1284,53 @@ def process_participants(df_raw, pseudonyms, target_column):
         y_pred_mean = np.full_like(y_test, fill_value=np.mean(y_train), dtype=float)
         r2_base = r2_score(y_test, y_pred_mean)
         mae_base = mean_absolute_error(y_test, y_pred_mean)
-        print("[EN][DEBUG] baseline(mean-of-train): R2={r2:.3f}, MAE={mae:.3f}".format(r2=r2_base, mae=mae_base))
+        print(
+            "[EN][DEBUG] baseline(mean-of-train): R2={r2:.3f}, MAE={mae:.3f}".format(
+                r2=r2_base, mae=mae_base
+            )
+        )
 
         # Checks & Hinweise
         if nz == 0 and abs(interc) < 1e-8:
-            print("[EN][WARN] Nullmodell: alle Koeffizienten = 0 und Intercept ≈ 0 → konstante Vorhersage 0.")
-            print("           Ursachen: sehr großes alpha oder sehr geringe Varianz im Startfenster/Train.")
+            print(
+                "[EN][WARN] Nullmodell: alle Koeffizienten = 0 und Intercept ≈ 0 → konstante Vorhersage 0."
+            )
+            print(
+                "           Ursachen: sehr großes alpha oder sehr geringe Varianz im Startfenster/Train."
+            )
 
         if _is_near_const(y_pred_en):
             print("[EN][WARN] Vorhersagen sind (nahezu) konstant. var(y_pred)≈0.")
-            print("           Prüfe alpha-Raster (zu groß?), l1_ratio (zu lasso-lastig?),")
-            print("           bzw. Zielvarianz im Startfenster (ggf. Startfenster erweitern).")
+            print(
+                "           Prüfe alpha-Raster (zu groß?), l1_ratio (zu lasso-lastig?),"
+            )
+            print(
+                "           bzw. Zielvarianz im Startfenster (ggf. Startfenster erweitern)."
+            )
 
         if r2_elastic < r2_base:
-            print("[EN][INFO] Modell schlägt Baseline (Train-Mean) NICHT. Evtl. Underfitting/zu starke Regularisierung.")
-            print("           Tipp: feineres alpha (z.B. 1e-6..1e2), l1_ratio etwas ridge-iger (<=0.3),")
+            print(
+                "[EN][INFO] Modell schlägt Baseline (Train-Mean) NICHT. Evtl. Underfitting/zu starke Regularisierung."
+            )
+            print(
+                "           Tipp: feineres alpha (z.B. 1e-6..1e2), l1_ratio etwas ridge-iger (<=0.3),"
+            )
             print("           oder Startfenster-Varianz prüfen/erweitern.")
 
         # Extremwerte/Skalen sanity checks
-        print("[EN][DEBUG] y_train[min,max,mean]={:.3f},{:.3f},{:.3f} | y_test[min,max,mean]={:.3f},{:.3f},{:.3f} | y_pred[min,max,mean]={:.3f},{:.3f},{:.3f}".format(
-            float(np.min(y_train)), float(np.max(y_train)), float(np.mean(y_train)),
-            float(np.min(y_test)),  float(np.max(y_test)),  float(np.mean(y_test)),
-            float(np.min(y_pred_en)), float(np.max(y_pred_en)), float(np.mean(y_pred_en))
-        ))
+        print(
+            "[EN][DEBUG] y_train[min,max,mean]={:.3f},{:.3f},{:.3f} | y_test[min,max,mean]={:.3f},{:.3f},{:.3f} | y_pred[min,max,mean]={:.3f},{:.3f},{:.3f}".format(
+                float(np.min(y_train)),
+                float(np.max(y_train)),
+                float(np.mean(y_train)),
+                float(np.min(y_test)),
+                float(np.max(y_test)),
+                float(np.mean(y_test)),
+                float(np.min(y_pred_en)),
+                float(np.max(y_pred_en)),
+                float(np.mean(y_pred_en)),
+            )
+        )
 
         # Optional: kleinste/niedrigste Standardabweichungen in den train-Features (nach Preprocessing)
         try:
@@ -1474,10 +1341,12 @@ def process_participants(df_raw, pseudonyms, target_column):
                 Xtr_std = Xt_train_en.std(axis=0)
             min_std = float(np.min(Xtr_std))
             n_zero_std = int(np.sum(np.isclose(Xtr_std, 0)))
-            print(f"[EN][DEBUG] Xt_train_en: min(std)={min_std:.3g}, #zero-std-cols={n_zero_std}")
+            print(
+                f"[EN][DEBUG] Xt_train_en: min(std)={min_std:.3g}, #zero-std-cols={n_zero_std}"
+            )
         except Exception as e:
             print("[EN][DEBUG] Feature-Std-Check skipped:", repr(e))
-                    
+
         # --- SHAP auf preprocessed Matrizen
         try:
             en_explainer = shap.LinearExplainer(model_en, Xt_train_en)
@@ -1503,17 +1372,12 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # Modelle speichern
         joblib.dump(
-            {"pre": pp_en, "scaler": fixed_scaler, "model": model_en},
+            {"pre": pp, "scaler": fixed_scaler, "model": model_en},
             os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"),
         )
 
         # ================= RANDOM FOREST: GridSearch NUR im Startfenster (+ fix) ====================
         print("[RF] GridSearchCV (TimeSeriesSplit) NUR Startfenster ...")
-
-        rf_pre = preprocess_train_only()
-        X_rf_tr = rf_pre.fit_transform(X.iloc[:init_end])
-        if fixed_scaler is not None:
-            X_rf_tr = fixed_scaler.transform(X_rf_tr)
 
         rf_search_est = Pipeline(
             [("model", RandomForestRegressor(random_state=RANDOM_STATE))]
@@ -1527,7 +1391,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             refit=True,
             error_score="raise",
         )
-        rf_gs.fit(X_rf_tr, y[:init_end])
+        rf_gs.fit(X_init_for_cv, y_train)
         rf_best_params = rf_gs.best_params_
         print("[Init-HP] RF best:", rf_best_params)
 
@@ -1537,12 +1401,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             if k.startswith("model__")
         }
 
-        rf_pre_fold = preprocess_train_only()
-        Xt_train_rf = rf_pre_fold.fit_transform(X_train_df)
-        Xt_test_rf = rf_pre_fold.transform(X_test_df)
-        if fixed_scaler is not None:
-            Xt_train_rf = fixed_scaler.transform(Xt_train_rf)
-            Xt_test_rf = fixed_scaler.transform(Xt_test_rf)
+        Xt_train_rf = X_init_for_cv
+        Xt_test_rf = pp.transform(X_test_df)
+        Xt_test_rf = fixed_scaler.transform(Xt_test_rf)
 
         model_rf = RandomForestRegressor(
             random_state=RANDOM_STATE, **rf_best_params_plain
@@ -1568,7 +1429,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("mean(|SHAP|):", float(np.nanmean(np.abs(rf_shap_values))))
         # Modelle speichern
         joblib.dump(
-            {"pre": rf_pre_fold, "scaler": fixed_scaler, "model": model_rf},
+            {"pre": pp, "scaler": fixed_scaler, "model": model_rf},
             os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"),
         )
 
@@ -1584,14 +1445,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             "01",
         )
         evaluate_and_plot_parity(
-            RESULTS_DIR, 
-            y_test, 
-            y_pred_rf, 
-            r2_rf, 
-            mae_rf, 
-            pseudonym, 
-            "rf", 
-            "03"
+            RESULTS_DIR, y_test, y_pred_rf, r2_rf, mae_rf, pseudonym, "rf", "03"
         )
 
         # Für Zeitreihen-Plot Roh/Pred (optional: nur Holdout anzeigen)
@@ -1606,9 +1460,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             "elastic": {
                 "pred": list(
                     model_en.predict(
-                        fixed_scaler.transform(pp_en.transform(X))
+                        fixed_scaler.transform(pp.transform(X))
                         if fixed_scaler
-                        else pp_en.transform(X)
+                        else pp.transform(X)
                     )
                 ),
                 "lower": None,
@@ -1617,9 +1471,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rf": {
                 "pred": list(
                     model_rf.predict(
-                        fixed_scaler.transform(rf_pre_fold.transform(X))
+                        fixed_scaler.transform(pp.transform(X))
                         if fixed_scaler
-                        else rf_pre_fold.transform(X)
+                        else pp.transform(X)
                     )
                 ),
                 "lower": None,
@@ -1659,10 +1513,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             shap_kind="linear",
             compute_shap=True,
             compute_pi=True,
-            n_splits=CONFIG["shap"]["n_splits"],
             test_size=CONFIG["shap"]["test_size"],
+            hp_train_frac=CONFIG["init_frac_for_hp"],
             embargo=CONFIG["shap"]["embargo"],
-            min_train_size=CONFIG["shap"]["min_train_size"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_scaler=fixed_scaler,
@@ -1692,10 +1545,9 @@ def process_participants(df_raw, pseudonyms, target_column):
             shap_kind="tree",
             compute_shap=True,
             compute_pi=True,
-            n_splits=CONFIG["shap"]["n_splits"],
             test_size=CONFIG["shap"]["test_size"],
+            hp_train_frac=CONFIG["init_frac_for_hp"],
             embargo=CONFIG["shap"]["embargo"],
-            min_train_size=CONFIG["shap"]["min_train_size"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_scaler=fixed_scaler,
@@ -1821,7 +1673,7 @@ target_column = PHQ2_COLUMN
 pseudonyms = df_raw["pseudonym"].unique()
 
 # %% Caching mechanism ===========================================================
-if os.path.exists(CACHE_RESULTS_PATH):
+if os.path.exists(CACHE_RESULTS_PATH) and LOAD_CACHED_RESULTS:
     print(f"[Info] Loading cached results from {CACHE_RESULTS_PATH} ...")
     cached_data = pd.read_pickle(CACHE_RESULTS_PATH)
     results, plot_data = cached_data

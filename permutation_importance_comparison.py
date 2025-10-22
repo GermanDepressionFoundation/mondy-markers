@@ -9,12 +9,18 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_test"
+DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_debug2"
 
 
 def extract_pid(path):
+    """
+    Extract pid from either:
+      <pid>_(EN|RF)_perm_group_summary.csv
+      <pid>_(EN|RF)_perm_group_folds.csv
+    Fallback: filename stem.
+    """
     base = os.path.basename(path)
-    m = re.match(r"(.+?)_(EN|RF)_perm_group_summary\.csv$", base)
+    m = re.match(r"(.+?)_(EN|RF)_perm_group_(summary|folds)\.csv$", base)
     return m.group(1) if m else os.path.splitext(base)[0]
 
 
@@ -54,6 +60,73 @@ def load_model_files(model_tag, data_dir=DATA_DIR):
 
         pid = extract_pid(fp)
         tmp = df[[feature_col, rel_mae_col]].copy()
+        tmp.columns = ["feature", "rel_delta_mae"]
+        tmp["pid"] = pid
+        records.append(tmp)
+
+    if not records:
+        return pd.DataFrame(columns=["feature", "rel_delta_mae", "pid"])
+    return pd.concat(records, ignore_index=True)
+
+
+def _coerce_fold_num(s):
+    """Try to coerce fold labels to numeric; return NaN if not possible."""
+    return pd.to_numeric(s, errors="coerce")
+
+
+def load_model_files_from_last_fold(model_tag, data_dir=DATA_DIR):
+    """
+    Load all <pid>_{model_tag}_perm_group_folds.csv and return a tidy DF:
+        columns = ["feature", "rel_delta_mae", "pid"]
+    using ONLY the *last* fold per participant (max numeric fold if available).
+    """
+    pattern = os.path.join(data_dir, f"*_{model_tag}_perm_group_folds.csv")
+    files = sorted(glob.glob(pattern))
+    records = []
+
+    for fp in files:
+        try:
+            df = pd.read_csv(fp)
+        except Exception as e:
+            print(f"Skipping {fp}: {e}")
+            continue
+
+        # Flexible column handling
+        feature_col = (
+            "group"
+            if "group" in df.columns
+            else ("feature" if "feature" in df.columns else None)
+        )
+        fold_col = "fold" if "fold" in df.columns else None
+        rel_mae_col = None
+        for cand in [
+            "rel_delta_MAE",
+            "rel_delta_maE",
+            "rel_delta_mae",
+            "rel_delta_Mae",
+        ]:
+            if cand in df.columns:
+                rel_mae_col = cand
+                break
+
+        if feature_col is None or rel_mae_col is None or fold_col is None:
+            print(
+                f"Skipping {fp}: required columns not found. Columns: {list(df.columns)}"
+            )
+            continue
+
+        # Determine last fold
+        df["_fold_num"] = _coerce_fold_num(df[fold_col])
+        if df["_fold_num"].notna().any():
+            last_fold_val = df.loc[df["_fold_num"].idxmax(), fold_col]
+        else:
+            # Fall back to lexicographic last if non-numeric
+            last_fold_val = df[fold_col].astype(str).sort_values().iloc[-1]
+
+        df_last = df[df[fold_col] == last_fold_val].copy()
+
+        pid = extract_pid(fp)
+        tmp = df_last[[feature_col, rel_mae_col]].copy()
         tmp.columns = ["feature", "rel_delta_mae"]
         tmp["pid"] = pid
         records.append(tmp)
@@ -379,8 +452,8 @@ def stacked_positive_relmae(
 # ---------------- MAIN: build shared order, then plot both models ----------------
 outputs = []
 
-df_en = load_model_files("EN")
-df_rf = load_model_files("RF")
+df_en = load_model_files_from_last_fold("EN")
+df_rf = load_model_files_from_last_fold("RF")
 
 # Save combined data
 for model, df in [("EN", df_en), ("RF", df_rf)]:
@@ -420,6 +493,33 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
 print(outputs)
 
 # ====================== PER-PARTICIPANT, PER-FOLD PLOTS ======================
+
+
+def load_fold_metrics(pid, model_tag, data_dir=DATA_DIR):
+    """
+    Load <pid>_<model>_fold_metrics.csv and return a dict {fold_label(str): r2(float)}.
+    If the file is missing or malformed, return {}.
+    """
+    path = os.path.join(data_dir, f"{pid}_{model_tag}_fold_metrics.csv")
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"Skipping fold metrics for {pid} {model_tag}: {e}")
+        return {}
+
+    # robust column handling
+    fold_col = "fold" if "fold" in df.columns else None
+    r2_col = "r2" if "r2" in df.columns else None
+    if fold_col is None or r2_col is None:
+        print(f"Fold metrics missing required columns in {path}: {list(df.columns)}")
+        return {}
+
+    # coerce fold labels to string for consistent matching
+    fold_labels = df[fold_col].astype(str).tolist()
+    r2_vals = pd.to_numeric(df[r2_col], errors="coerce").tolist()
+    return {f: (v if np.isfinite(v) else None) for f, v in zip(fold_labels, r2_vals)}
 
 
 def load_per_fold_file(model_tag, data_dir=DATA_DIR):
@@ -624,6 +724,7 @@ def per_participant_stacked_positive(
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
     Absolute scale (no normalization). Totals labeled.
+    Now also annotates each bar with the fold R² from <pid>_<model>_fold_metrics.csv.
     """
     if df_pid.empty:
         return
@@ -641,7 +742,7 @@ def per_participant_stacked_positive(
         index="feature", columns="fold", values="rel_pos", aggfunc="sum"
     ).fillna(0.0)
 
-    # order folds
+    # order folds (use your helper) and ensure all exist
     fold_order = _order_folds(df_pid)
     for f in fold_order:
         if f not in piv.columns:
@@ -659,6 +760,11 @@ def per_participant_stacked_positive(
 
     # totals per fold
     totals_fold = piv.sum(axis=0)
+
+    # --- NEW: load fold-level R² and align to fold_order
+    r2_map = load_fold_metrics(pid, model_tag, DATA_DIR)
+    # keys as strings for robust matching
+    r2_per_fold = [r2_map.get(str(f), None) for f in fold_order]
 
     x = np.arange(len(fold_order))
     features = piv.index.tolist()
@@ -688,11 +794,26 @@ def per_participant_stacked_positive(
         )
         bottoms += heights
 
-    # label totals
+    # label totals and R² on top
     if label_totals:
-        for xi, total in zip(x, totals_fold.values):
-            if total > 0:
-                ax.text(xi, total, f"{total:.2f}", ha="center", va="bottom", fontsize=9)
+        ymax = totals_fold.max() if len(totals_fold) else 0.0
+        offset = 0.02 * ymax if ymax > 0 else 0.02  # small vertical gap
+        for xi, (fold_label, total, r2_val) in enumerate(
+            zip(fold_order, totals_fold.values, r2_per_fold)
+        ):
+            if total > 0 or (r2_val is not None):
+                if r2_val is not None:
+                    text = f"{total:.2f}\nR²={r2_val:.2f}"
+                else:
+                    text = f"{total:.2f}"
+                ax.text(
+                    xi,
+                    total + offset,
+                    text,
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
 
     ax.set_xticks(x)
     ax.set_xticklabels(fold_order, rotation=45, ha="right")

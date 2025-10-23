@@ -9,7 +9,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_debug2"
+DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_7030_split"
 
 
 def extract_pid(path):

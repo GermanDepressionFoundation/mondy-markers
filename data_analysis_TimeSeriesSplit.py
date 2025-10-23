@@ -28,14 +28,14 @@ CONFIG = {
     "top_k": 15,
     "paths": {
         "data": "data/df_merged_dupsfree_v8.pickle",
-        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_debug2",
+        "results_dir": "results_with_nightfeatures_perfeaturescaler_timeaware_7030_split",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
         "phq9": "woche_PHQ9_sum",
     },
     # Anteil Startfenster für HP-Tuning und Pipeline-Fit
-    "init_frac_for_hp": 0.50,
+    "init_frac_for_hp": 0.70,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
     # Gap/Embargo in TimeSeriesSplit für CV

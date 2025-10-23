@@ -1,13 +1,14 @@
 # %% Data Loading and Setup =====================================================
 import json
 import os
+from datetime import timedelta
 from typing import Dict, List, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn import set_config
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -34,7 +35,7 @@ CONFIG = {
         "phq9": "woche_PHQ9_sum",
     },
     # Anteil Startfenster für HP-Tuning und Pipeline-Fit
-    "init_frac_for_hp": 0.70,
+    "init_frac_for_hp": 0.50,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
     # Gap/Embargo in TimeSeriesSplit für CV
@@ -571,128 +572,67 @@ def _block_permute_col(X_df, col_idx, block_len, rng):
 def run_explain_over_splits(
     X_df: pd.DataFrame,
     y: np.ndarray,
+    ts: pd.Series,  # <-- NEW: timestamps aligned with X_df/y
     make_model,  # callable -> unfit model (EN/RF/...)
     compute_pi: bool = True,
-    test_size: int = 30,
     hp_train_frac: float = 0.3,
-    embargo: int = 0,
+    test_days: int = 30,  # 30-day test window
+    step_days: int = 30,  # 30-day increments (train grows by this)
+    embargo_days: int = 0,
     n_repeats: int = 50,
     random_state: int = 42,
     fixed_preprocess_pipeline: Pipeline | None = None,
 ):
     """
-    Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
-    (blockierter) Permutation Importance auf dem Testfenster.
-
-    Für eine chronologisch sortierte Tagesreihe erzeugt die Funktion Rolling-Origin-Splits
-    (Expanding per Default), trainiert je Fold eine Preprocessing+Modell-Pipeline auf dem
-    Trainingsfenster, evaluiert auf dem Testfenster (R²/MAE) und berechnet optional
-    blockierte Permutation Importances. Zusätzlich kann eine
-    gruppenweise PI (z. B. HRV/ACT/COMM/SLEEP) berechnet werden, um Quellen-Anteile
-    direkt zu erhalten (für 100%-Plots und statistische Tests).
-
-    Parameters
-    ----------
-    X_df : pandas.DataFrame
-        Chronologisch sortierte Feature-Matrix (Zeilen = Tage).
-    y : np.ndarray
-        Zielvektor gleicher Länge wie X_df.
-    make_model : callable
-        Fabrikfunktion, die einen **ungefitten** Estimator/Pipeline zurückgibt (z. B. ElasticNet).
-    compute_pi : bool, optional
-        Ob pro Fold Permutation Importances berechnet werden (Feature-weise + Gruppen-weise).
-    test_size : int, optional
-        Länge des Testfensters je Fold (in Tagen).
-    embargo : int, optional
-        Sicherheitslücke zwischen Train-Ende und Test-Start (Tage), um Leakage zu vermeiden.
-    n_repeats : int, optional
-        Wiederholungen pro Feature/Gruppe für PI (Monte-Carlo-Schätzung).
-    random_state : int, optional
-        Seed für Reproduzierbarkeit (wird für Permutation verwendet).
-    fixed_preprocess_pipeline : Pipeline | None, optional
-        Optionale, bereits gefittete Preprocessing-Pipeline, die **in allen Folds
-        unverändert** auf Train/Test angewandt wird (für konsistente Feature-Skalen
-        und damit vergleichbare PI über Folds).
-
-    Returns
-    -------
-    dict
-        {
-          "fold_metrics_df":  DataFrame mit R²/MAE je Fold,
-          "pi_folds_df":      DataFrame mit (fold, feature, delta_R2, delta_MAE) oder None,
-          "pi_summary_df":    Median-aggregation über Folds oder None,
-          "pi_groups_folds_df":   DataFrame mit (fold, group, delta_R2_mean, delta_MAE_mean, rel_*) oder None,
-          "pi_groups_summary_df": Median-aggregation über Folds oder None,
-        }
-
-    Notes
-    -----
-    - Preprocessing wird **ausschließlich auf TRAIN** gefittet und auf TEST angewandt (leakage-sicher).
-    - Permutation erfolgt **blockweise** (CONFIG["pi"]["block_len"]), um Autokorrelation/Seasonality zu respektieren.
-    - Gruppen-PI erwartet CONFIG["feature_groups"] als Mapping {gruppe: [features]} (z. B. COARSE_GROUPS oder DAY_NIGHT_GROUPS).
-    - Für 100%-Plots: pro Fold die Gruppen-Importanzen relativieren (Summe = 1), dann über Folds/Personen mitteln (Median + IQR).
-    - PI werden für 100%-Darstellungen fold-normalisiert (Summe je Fold = 1):
-        PI: rel_delta_R2.
-        Die Summary-Tabellen basieren auf Medianen dieser relativen Werte, was robuste, vergleichbare Aggregation
-        über Folds (und später über Personen) erlaubt.
-
-    Example
-    -------
-    >>> CONFIG["pi"] = {"block_len": 7, "n_repeats": 50}
-    >>> CONFIG["feature_groups"] = COARSE_GROUPS   # oder DAY_NIGHT_GROUPS
-    >>> res = run_explain_over_splits(
-    ...     X_df, y, make_model=make_en_pipeline, compute_pi=True,
-    ...     n_splits=5, test_size=14, min_train_size=90, random_state=42
-    ... )
-    >>> res["pi_groups_summary_df"].head()
+    Expanding, **time-based** rolling-origin evaluation.
+    Windows are defined in days (not sample counts).
     """
 
-    splits = rolling_origin_splits(
-        n_samples=len(y),
-        test_size=test_size,
-        hp_train_frac=hp_train_frac,
-        embargo=embargo,
-        step_train=30,
-        min_test_size=5,
+    # Build time-based splits
+    splits = rolling_time_splits_by_fraction(
+        ts=ts,
+        init_frac_for_hp=hp_train_frac,
+        test_days=test_days,
+        step_days=step_days,
+        embargo_days=embargo_days,
+        min_test_samples=1,
     )
 
     rng = np.random.default_rng(random_state)
-    fold_rows = []
-    pi_rows = []
-    pi_group_rows = []
+    fold_rows, pi_rows, pi_group_rows = [], [], []
 
-    for fold_id, (tr, te) in enumerate(splits, start=1):
-        Xt_tr = fixed_preprocess_pipeline.transform(X_df.iloc[tr])  # train-only fit
-        Xt_te = fixed_preprocess_pipeline.transform(X_df.iloc[te])
+    for fold_id, (tr_idx, te_idx, meta) in enumerate(splits, start=1):
+        # transform with fixed preprocessor (already fitted before)
+        Xt_tr = fixed_preprocess_pipeline.transform(X_df.iloc[tr_idx])
+        Xt_te = fixed_preprocess_pipeline.transform(X_df.iloc[te_idx])
 
-        # --- Modell fitten
         model = make_model()
-        model.fit(Xt_tr, y[tr])
+        model.fit(Xt_tr, y[tr_idx])
 
-        # --- Test-Metriken
         y_hat = model.predict(Xt_te)
-        R2 = r2_score(y[te], y_hat)
-        MAE = mean_absolute_error(y[te], y_hat)
+        R2 = r2_score(y[te_idx], y_hat)
+        MAE = mean_absolute_error(y[te_idx], y_hat)
+
         fold_rows.append(
             {
                 "fold": fold_id,
                 "r2": float(R2),
                 "mae": float(MAE),
-                "n_train": int(len(tr)),
-                "n_test": int(len(te)),
-                "train_end_idx": int(tr[-1]),
-                "test_start_idx": int(te[0]),
-                "test_end_idx": int(te[-1]),
+                "n_train_samples": int(len(tr_idx)),  # <-- counts
+                "n_test_samples": int(len(te_idx)),  # <-- counts
+                "train_from_ts": meta["train_from_ts"],  # <-- timestamps
+                "train_to_ts": meta["train_to_ts"],
+                "test_from_ts": meta["test_from_ts"],
+                "test_to_ts": meta["test_to_ts"],
             }
         )
 
-        # --- Permutation Importance – auf Testfenster pro Block pro Feture
         if compute_pi:
             cols = list(Xt_te.columns)
-            # Baseline für deltas
             y_hat_base = y_hat
             R2_base = R2
             MAE_base = MAE
+
             for j, col in enumerate(cols):
                 dR2_list, dMAE_list = [], []
                 for _ in range(n_repeats):
@@ -700,8 +640,8 @@ def run_explain_over_splits(
                         Xt_te, j, block_len=CONFIG["pi"]["block_len"], rng=rng
                     )
                     y_hat_p = model.predict(Xp)
-                    dR2_list.append(R2_base - r2_score(y[te], y_hat_p))
-                    dMAE_list.append(mean_absolute_error(y[te], y_hat_p) - MAE_base)
+                    dR2_list.append(R2_base - r2_score(y[te_idx], y_hat_p))
+                    dMAE_list.append(mean_absolute_error(y[te_idx], y_hat_p) - MAE_base)
                 pi_rows.append(
                     {
                         "fold": fold_id,
@@ -720,13 +660,13 @@ def run_explain_over_splits(
                         ),
                     }
                 )
-        # --- Gruppenweise Permutation Importance (blockweise)
 
+        # Grouped PI on the same test window
         df_pi_groups = permutation_importance_by_group(
             fitted_estimator=model,
             X_test=Xt_te,
-            y_test=y[te],
-            groups=CONFIG["feature_groups"],  # TODO: into fun args?
+            y_test=y[te_idx],
+            groups=CONFIG["feature_groups"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             block_len=CONFIG["pi"]["block_len"],
             random_state=CONFIG["random_state"],
@@ -734,7 +674,6 @@ def run_explain_over_splits(
         df_pi_groups["fold"] = fold_id
         pi_group_rows.extend(df_pi_groups.to_dict(orient="records"))
 
-    # Ergebnisse zusammenfassen
     fold_metrics_df = pd.DataFrame(fold_rows)
 
     pi_folds_df = pd.DataFrame(pi_rows) if compute_pi else None
@@ -762,8 +701,8 @@ def run_explain_over_splits(
             .reset_index()
         )
         if compute_pi
-        and pi_groups_folds_df is not None
-        and not pi_groups_folds_df.empty
+        and (pi_groups_folds_df is not None)
+        and (not pi_groups_folds_df.empty)
         else None
     )
 
@@ -826,6 +765,76 @@ def days_since_start(group):
     return (group["timestamp_utc"] - start_date).dt.days
 
 
+def _time_cutoff_by_fraction(ts: pd.Series, frac: float) -> pd.Timestamp:
+    if ts.empty:
+        raise ValueError("Empty timestamp series.")
+    t0, t1 = ts.min(), ts.max()
+    if pd.isna(t0) or pd.isna(t1) or t0 == t1:
+        return t1
+    return t0 + (t1 - t0) * float(frac)
+
+
+def rolling_time_splits_by_fraction(
+    ts: pd.Series,
+    init_frac_for_hp: float,  # e.g., CONFIG["init_frac_for_hp"]
+    test_days: int = 30,  # fixed test length
+    step_days: int = 30,  # extend training end by one month per fold
+    embargo_days: int = 0,
+    min_test_samples: int = 1,
+):
+    """
+    Expanding, time-based rolling-origin splits:
+
+      - Initial train window = fraction of total time span (init_frac_for_hp)
+      - Each fold extends train_end by exactly `step_days` (30) days
+      - Test window is always `test_days` (30) days
+    """
+    assert pd.api.types.is_datetime64_any_dtype(ts), "ts must be datetime-like"
+    if ts.empty:
+        return []
+
+    t_min, t_max = ts.min(), ts.max()
+    train_from = t_min
+    # initial training end by fraction of time span:
+    train_to = _time_cutoff_by_fraction(ts, init_frac_for_hp)
+
+    td_test = timedelta(days=int(test_days))
+    td_step = timedelta(days=int(step_days))
+    td_emb = timedelta(days=int(embargo_days))
+
+    splits = []
+    while train_from < t_max:
+        test_from = train_to + td_emb
+        if test_from > t_max:
+            break
+        test_to = min(test_from + td_test, t_max)
+
+        tr_idx = ts.index[(ts >= train_from) & (ts < train_to)].to_numpy()
+        te_idx = ts.index[(ts >= test_from) & (ts < test_to)].to_numpy()
+
+        if te_idx.size >= min_test_samples:
+            splits.append(
+                (
+                    tr_idx,
+                    te_idx,
+                    {
+                        "train_from_ts": pd.Timestamp(train_from),
+                        "train_to_ts": pd.Timestamp(train_to),
+                        "test_from_ts": pd.Timestamp(test_from),
+                        "test_to_ts": pd.Timestamp(test_to),
+                    },
+                )
+            )
+
+        if test_to >= t_max:
+            break
+
+        # extend training end by one month for the next fold
+        train_to = min(train_to + td_step, t_max)
+
+    return splits
+
+
 # %% Main Processing Function ===================================================
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
@@ -840,7 +849,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     ensure_results_dir()
 
-    for pseudonym in ["bubblypie2"]:
+    for pseudonym in pseudonyms:
         print("========================================")
         print(f"Processing {pseudonym}")
         print("========================================")
@@ -854,22 +863,39 @@ def process_participants(df_raw, pseudonyms, target_column):
         mask_valid = np.isfinite(y)
         X = X.loc[mask_valid].reset_index(drop=True)
         y = np.asarray(y)[mask_valid]
+        ts_valid = df_participant.loc[mask_valid, "timestamp_utc"].reset_index(
+            drop=True
+        )
+
         n = len(y)
         if n < 30:
             print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
             continue
 
-        # --- Dummy Regressor ---
-        train_frac = CONFIG["init_frac_for_hp"]
-        gap = 0
-        split = int(round(train_frac * n))
-        idx_train = np.arange(0, split - gap)
-        idx_test = np.arange(split, n)
+        # --- time-based initial split by CONFIG["init_frac_for_hp"] ----------
+        train_frac = CONFIG["init_frac_for_hp"]  # e.g., 0.70 of time span
+        cut_ts = _time_cutoff_by_fraction(ts_valid, train_frac)
+
+        idx_train = np.where(ts_valid <= cut_ts)[0]
+        idx_test = np.where(ts_valid > cut_ts)[0]
+
+        if idx_test.size == 0:
+            print(f"[WARN] {pseudonym}: no holdout after time cutoff; skipping.")
+            continue
 
         X_train_df = X.iloc[idx_train].copy()
         X_test_df = X.iloc[idx_test].copy()
         y_train = y[idx_train]
         y_test = y[idx_test]
+
+        print(
+            f"[INFO] time cutoff @ {cut_ts} "
+            f"→ train: {idx_train.size} samples, test: {idx_test.size} samples"
+        )
+
+        # Train-only Preprocessing (fit on initial train window)
+        pp = preprocess_pipeline()
+        X_init_for_hp = pp.fit_transform(X_train_df)
 
         print(f"{train_frac}:var(y_train) =", float(np.var(y_train)))
         print(f"{1-train_frac}:var(y_test) =", float(np.var(y_test)))
@@ -878,7 +904,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # Train-only Preprocessing (Imputation) auf Startfenster
         pp = preprocess_pipeline()
-        X_init_for_cv = pp.fit_transform(X_train_df)
+        X_init_for_hp = pp.fit_transform(X_train_df)
 
         en = ElasticNet(
             max_iter=CONFIG["en"]["max_iter"],
@@ -903,7 +929,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             scoring="r2",
         )
 
-        en_gs.fit(X_init_for_cv, y_train)
+        en_gs.fit(X_init_for_hp, y_train)
         best_params = en_gs.best_params_
         best_alpha = float(best_params.get("alpha", best_params.get("model__alpha")))
         best_l1 = float(best_params.get("l1_ratio", best_params.get("model__l1_ratio")))
@@ -919,7 +945,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("[EN] Fit mit fixen HP (aus Startfenster) ...")
 
         # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
-        Xt_train_en = X_init_for_cv
+        Xt_train_en = X_init_for_hp
         Xt_test_en = pp.transform(X_test_df)
 
         # --- MODELL: ElasticNet mit fixen HP aus dem Startfenster
@@ -1053,7 +1079,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             refit=True,
             error_score="raise",
         )
-        rf_gs.fit(X_init_for_cv, y_train)
+        rf_gs.fit(X_init_for_hp, y_train)
         rf_best_params = rf_gs.best_params_
         print("[Init-HP] RF best:", rf_best_params)
 
@@ -1063,7 +1089,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             if k.startswith("model__")
         }
 
-        Xt_train_rf = X_init_for_cv
+        Xt_train_rf = X_init_for_hp
         Xt_test_rf = pp.transform(X_test_df)
 
         model_rf = RandomForestRegressor(
@@ -1143,8 +1169,8 @@ def process_participants(df_raw, pseudonyms, target_column):
             "phq2_raw": y.tolist(),
             "individual_adherence": individual_adherence.tolist(),
             "global_adherence": global_adherence.tolist(),
-            "train_mask": [i < split for i in range(n)],
-            "test_mask": [i >= split for i in range(n)],
+            "train_mask": (ts_valid <= cut_ts).tolist(),
+            "test_mask": (ts_valid > cut_ts).tolist(),
             "elastic": {
                 "pred": list(model_en.predict(pp.transform(X))),
                 "lower": None,
@@ -1185,11 +1211,13 @@ def process_participants(df_raw, pseudonyms, target_column):
         res_en = run_explain_over_splits(
             X_df=X,
             y=y,
+            ts=ts_valid,
             make_model=make_en,
             compute_pi=True,
-            test_size=CONFIG["pi"]["test_size"],
             hp_train_frac=CONFIG["init_frac_for_hp"],
-            embargo=CONFIG["pi"]["embargo"],
+            test_days=30,
+            step_days=30,
+            embargo_days=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_preprocess_pipeline=pp,
@@ -1215,11 +1243,13 @@ def process_participants(df_raw, pseudonyms, target_column):
         res_rf = run_explain_over_splits(
             X_df=X,
             y=y,
+            ts=ts_valid,
             make_model=make_rf,
             compute_pi=True,
-            test_size=CONFIG["pi"]["test_size"],
             hp_train_frac=CONFIG["init_frac_for_hp"],
-            embargo=CONFIG["pi"]["embargo"],
+            test_days=30,
+            step_days=30,
+            embargo_days=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_preprocess_pipeline=pp,

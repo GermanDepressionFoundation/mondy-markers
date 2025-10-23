@@ -852,7 +852,6 @@ def plot_importance_bars(
     plt.close()
 
 
-# >>> NEW: Folds auf Zeitreihe visualisieren (PHQ-2 + Testfenster + R2/MAE)
 def plot_folds_on_timeseries(
     timestamps: pd.Series,
     y_values: np.ndarray,
@@ -860,36 +859,105 @@ def plot_folds_on_timeseries(
     out_path: str,
     title: str = "Rolling test windows with metrics",
 ):
+    """
+    Visualizes PHQ-2 with shaded test windows.
+    Expects time-based columns in fold_metrics_df:
+      - test_from_ts, test_to_ts (prefers these)
+      - optionally train_from_ts, train_to_ts (not used for shading, only available for context)
+      - r2, mae, n_test
+    Falls back to legacy index-based fields (test_start_idx/test_end_idx) if timestamps are absent.
+    """
     if fold_metrics_df is None or fold_metrics_df.empty:
         return
 
+    # Ensure timestamps are datetime-like
+    ts_main = pd.to_datetime(timestamps)
+
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(timestamps, y_values, lw=1.5)
+    ax.plot(ts_main, y_values, lw=1.5)
     ax.set_title(title)
-    ax.set_xlabel("Zeit")
+    ax.set_xlabel("Date")
     ax.set_ylabel("PHQ-2")
 
+    # Vertical extent for labels
     ymin, ymax = np.nanmin(y_values), np.nanmax(y_values)
-    yr = ymax - ymin if np.isfinite(ymin) and np.isfinite(ymax) else 1.0
-    label_y = ymax + 0.05 * yr  # Beschriftung oberhalb
+    if not (np.isfinite(ymin) and np.isfinite(ymax)):
+        ymin, ymax = 0.0, 1.0
+    yr = max(ymax - ymin, 1.0)
+    label_y = ymax + 0.05 * yr
 
-    for _, row in fold_metrics_df.iterrows():
-        ts = int(row["test_start_idx"])
-        te = int(row["test_end_idx"])
-        if ts >= len(timestamps) or te >= len(timestamps):
+    # Work on a copy with normalized dtypes
+    fm = fold_metrics_df.copy()
+
+    # Prefer time-based columns when available
+    has_time_cols = {"test_from_ts", "test_to_ts"}.issubset(set(fm.columns))
+    if has_time_cols:
+        fm["test_from_ts"] = pd.to_datetime(fm["test_from_ts"], errors="coerce")
+        fm["test_to_ts"] = pd.to_datetime(fm["test_to_ts"], errors="coerce")
+
+    for _, row in fm.iterrows():
+        # Determine span
+        if (
+            has_time_cols
+            and pd.notna(row.get("test_from_ts"))
+            and pd.notna(row.get("test_to_ts"))
+        ):
+            t_start = row["test_from_ts"]
+            t_end = row["test_to_ts"]
+        else:
+            # Fallback to legacy index-based fields
+            ts_idx = int(row.get("test_start_idx", -1))
+            te_idx = int(row.get("test_end_idx", -1))
+            if (
+                ts_idx < 0
+                or te_idx < 0
+                or ts_idx >= len(ts_main)
+                or te_idx >= len(ts_main)
+            ):
+                continue
+            t_start = ts_main.iloc[ts_idx]
+            t_end = ts_main.iloc[te_idx]
+
+        # Guard invalid order
+        if pd.isna(t_start) or pd.isna(t_end) or t_end <= t_start:
             continue
-        ax.axvspan(timestamps.iloc[ts], timestamps.iloc[te], color="orange", alpha=0.18)
-        xm = timestamps.iloc[(ts + te) // 2]
-        ax.text(
-            xm,
-            label_y,
-            f'R²={row["r2"]:.2f}, MAE={row["mae"]:.2f}',
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            rotation=0,
-        )
 
+        # Shade test window
+        ax.axvspan(t_start, t_end, color="orange", alpha=0.18)
+
+        # Label at the center of the window
+        try:
+            xm = t_start + (t_end - t_start) / 2
+        except Exception:
+            xm = t_start
+
+        # Build annotation text
+        r2 = row.get("r2", np.nan)
+        mae = row.get("mae", np.nan)
+        n_te = row.get("n_test", np.nan)
+
+        parts = []
+        if pd.notna(r2):
+            parts.append(f"R²={float(r2):.2f}")
+        if pd.notna(mae):
+            parts.append(f"MAE={float(mae):.2f}")
+        if pd.notna(n_te):
+            parts.append(f"n={int(n_te)}")
+
+        label = ", ".join(parts) if parts else ""
+
+        if label:
+            ax.text(
+                xm,
+                label_y,
+                label,
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    ax.margins(x=0.02)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()

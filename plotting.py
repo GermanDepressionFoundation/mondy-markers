@@ -299,7 +299,6 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                "adherence": d["adherence"][:n],
                 # "lower": d[model_key]["lower"][:n],
                 # "upper": d[model_key]["upper"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
@@ -392,10 +391,12 @@ def plot_phq2_timeseries_with_adherence_from_results(
     results_dir, plot_data, model_key="rf"
 ):
     """
-    Plot two vertically stacked subplots per participant:
+    Create three vertically stacked subplots per participant:
       (1) PHQ-2 raw data (train/test) + model predictions
-      (2) Adherence trend (as percentage if 0–1 values are given)
+      (2) Individual adherence trend
+      (3) Global adherence trend
 
+    Adherence series are auto-interpreted as percentages if values are in [0, 1].
     Saves one PNG per participant into <results_dir>/timeseries/.
     """
 
@@ -403,7 +404,12 @@ def plot_phq2_timeseries_with_adherence_from_results(
     os.makedirs(save_dir, exist_ok=True)
 
     for pseudo, d in plot_data.items():
-        if model_key not in d or "adherence" not in d:
+        # Require model and both adherence series
+        if (
+            model_key not in d
+            or "individual_adherence" not in d
+            or "global_adherence" not in d
+        ):
             continue
 
         # -------- align lengths safely -----------------------------------
@@ -412,7 +418,8 @@ def plot_phq2_timeseries_with_adherence_from_results(
             len(d["phq2_raw"]),
             len(d[model_key]["pred"]),
             len(d["train_mask"]),
-            len(d["adherence"]),
+            len(d["individual_adherence"]),
+            len(d["global_adherence"]),
         )
         if n == 0:
             continue
@@ -422,7 +429,8 @@ def plot_phq2_timeseries_with_adherence_from_results(
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                "adherence": d["adherence"][:n],
+                "ind_adherence": d["individual_adherence"][:n],
+                "glob_adherence": d["global_adherence"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
             }
         ).sort_values("ts")
@@ -435,20 +443,23 @@ def plot_phq2_timeseries_with_adherence_from_results(
             if model_key == "elastic"
             else PLOT_STYLES["colors"]["RF"]
         )
-        adherence_color = PLOT_STYLES["colors"].get("Adherence", "#6A5ACD")
+        # allow separate colors; provide fallbacks if not defined
+        ind_color = PLOT_STYLES["colors"].get("AdherenceIndividual", "#6A5ACD")
+        glob_color = PLOT_STYLES["colors"].get("AdherenceGlobal", "#2CA02C")
+
         m_train, m_test = "o", "s"
 
-        # --- build figure with two stacked axes --------------------------
-        fig, (ax1, ax2) = plt.subplots(
-            2,
+        # --- figure with three stacked axes -------------------------------
+        fig, (ax1, ax2, ax3) = plt.subplots(
+            3,
             1,
-            figsize=(10, 7),
+            figsize=(10, 9),
             sharex=True,
-            gridspec_kw={"height_ratios": [2.5, 1.0], "hspace": 0.05},
+            gridspec_kw={"height_ratios": [2.5, 1.0, 1.0], "hspace": 0.06},
         )
 
         # ===============================================================
-        #  TOP: PHQ-2 raw data and model prediction
+        #  (1) TOP: PHQ-2 raw data and model prediction
         # ===============================================================
         ax1.plot(
             df["ts"],
@@ -496,35 +507,54 @@ def plot_phq2_timeseries_with_adherence_from_results(
         ax1.set_title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
 
         # ===============================================================
-        #  BOTTOM: adherence
+        #  (2) MIDDLE: Individual adherence
         # ===============================================================
-        adh = pd.to_numeric(df["adherence"], errors="coerce")
-        if np.nanmax(adh) <= 1.0:
-            adh_plot = adh * 100.0
-            y_label = "Adherence (%)"
+        ind = pd.to_numeric(df["ind_adherence"], errors="coerce")
+        if np.nanmax(ind) <= 1.0:
+            ind_plot = ind * 100.0
+            ind_label = "Individual adherence (%)"
+            ind_ylim = (0, 100)
         else:
-            adh_plot = adh
-            y_label = "Adherence"
+            ind_plot = ind
+            ind_label = "Individual adherence"
+            ind_ylim = None
 
-        ax2.plot(df["ts"], adh_plot, color=adherence_color, lw=1.2, label="Adherence")
-        ax2.fill_between(
-            df["ts"], adh_plot, step=None, alpha=0.1, color=adherence_color
-        )
-
-        if "Adherence (%)" in y_label:
-            ax2.set_ylim(0, 100)
-        ax2.set_ylabel(y_label)
-        ax2.set_xlabel("Date")
+        ax2.plot(df["ts"], ind_plot, color=ind_color, lw=1.2, label="Individual")
+        ax2.fill_between(df["ts"], ind_plot, step=None, alpha=0.10, color=ind_color)
+        if ind_ylim is not None:
+            ax2.set_ylim(*ind_ylim)
+        ax2.set_ylabel(ind_label)
         ax2.legend(loc="upper left")
+
+        # ===============================================================
+        #  (3) BOTTOM: Global adherence
+        # ===============================================================
+        glob = pd.to_numeric(df["glob_adherence"], errors="coerce")
+        if np.nanmax(glob) <= 1.0:
+            glob_plot = glob * 100.0
+            glob_label = "Global adherence (%)"
+            glob_ylim = (0, 100)
+        else:
+            glob_plot = glob
+            glob_label = "Global adherence"
+            glob_ylim = None
+
+        ax3.plot(df["ts"], glob_plot, color=glob_color, lw=1.2, label="Global")
+        ax3.fill_between(df["ts"], glob_plot, step=None, alpha=0.10, color=glob_color)
+        if glob_ylim is not None:
+            ax3.set_ylim(*glob_ylim)
+        ax3.set_ylabel(glob_label)
+        ax3.set_xlabel("Date")
+        ax3.legend(loc="upper left")
 
         # ===============================================================
         #  Final layout and export
         # ===============================================================
-        for ax in (ax1, ax2):
+        for ax in (ax1, ax2, ax3):
             ax.grid(True, which="major", axis="y", linestyle="--", alpha=0.3)
 
         fig.tight_layout()
-        out_path = f"{save_dir}/{pseudo}_{model_key}_stacked.png"
+        out_path = f"{save_dir}/{pseudo}_{model_key}_stacked3.png"
         add_logo_to_figure(fig)
         fig.savefig(out_path, dpi=300)
         plt.close(fig)

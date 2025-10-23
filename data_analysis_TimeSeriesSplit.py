@@ -1,22 +1,19 @@
 # %% Data Loading and Setup =====================================================
 import json
 import os
-from collections import Counter
-from datetime import timedelta
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
-import shap
 from sklearn import set_config
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
-from sklearn.impute import IterativeImputer, SimpleImputer
-from sklearn.linear_model import ElasticNet, ElasticNetCV
+from sklearn.impute import IterativeImputer
+from sklearn.linear_model import ElasticNet
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
@@ -67,21 +64,12 @@ CONFIG = {
     },
     # Rolling Permutation Importance
     "pi": {
-        "n_splits": 5,
         "test_size": 30,
-        "min_train_size": 90,
+        "train_size": 30,
         "embargo": 0,
         "n_repeats": 10,  # 10 nunr für smoke test (sonst 50)
         "agg": "mean",  # "mean" oder "median"
         "block_len": 7,  # Länge der Blöcke für blockweise Permutation
-    },
-    # Rolling SHAP (gleiche Fenster wie PI)
-    "shap": {
-        "n_splits": 5,
-        "test_size": 30,
-        "min_train_size": 90,
-        "embargo": 0,
-        "agg": "mean",  # "mean" oder "median"
     },
 }
 
@@ -194,14 +182,12 @@ class Log1pScaler(BaseEstimator, TransformerMixin):
 # %% Plot-Imports (deine vorhandenen Utils) ==========================
 from plotting import (
     evaluate_and_plot_parity,
-    plot_feature_importance_stats,
     plot_folds_on_timeseries,
     plot_importance_bars,
     plot_mae_rmssd_bar_2,
     plot_phq2_test_errors_from_results,
     plot_phq2_timeseries_from_results,
-    plot_shap_summary_and_bar,
-    plot_timeseries_with_folds,
+    plot_phq2_timeseries_with_adherence_from_results,
 )
 
 
@@ -340,7 +326,7 @@ def impute_pipeline():
     Notes
     -----
     - Der globale, fixe Scaler (falls genutzt) wird separat bereitgestellt.
-    - So bleiben β/SHAP mit fixem Scaler über Zeit vergleichbar, während
+    - So bleiben β mit fixem Scaler über Zeit vergleichbar, während
       Imputation & per-Feature-Skalierung weiterhin train-only bleiben.
     """
     # Beispiel: baue hier deine bisherigen Steps OHNE finalen globalen StandardScaler
@@ -745,57 +731,10 @@ def _block_permute_col(X_df, col_idx, block_len, rng):
     return Xp
 
 
-def _fold_normalize(
-    df: pd.DataFrame, fold_col: str, value_col: str, rel_col: str = "rel_value"
-) -> pd.DataFrame:
-    """
-    Normiert Importanzwerte pro Fold so, dass die Summe je Fold = 1 ist.
-
-    Für 100%-Darstellungen und robuste Aggregation über Folds werden die innerhalb
-    eines Folds berechneten Importanzen (z. B. mean_abs_shap oder delta_R2) auf die
-    fold-spezifische Gesamtsumme skaliert. Dadurch sind Features/Quellen zwischen
-    Folds vergleichbar; anschließende Median-/IQR-Aggregation reflektiert stabile
-    relative Bedeutung statt absoluter Skalenartefakte.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Tabelle mit mindestens den Spalten (fold_col, value_col).
-    fold_col : str
-        Spaltenname des Fold-Identifiers (z. B. "fold").
-    value_col : str
-        Spaltenname des zu normierenden Werts (z. B. "mean_abs_shap" oder "delta_R2").
-    rel_col : str, optional
-        Name der neuen Spalte für den relativen, auf 1 normierten Wert.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Kopie von df mit zusätzlich der Spalte `rel_col`.
-
-    Notes
-    -----
-    - Falls die Fold-Summe 0 ist, wird der relative Wert auf 0 gesetzt.
-    - Für Gruppen-PI kann delta_R2 bevorzugt normiert werden (Interpretation als
-      erklärter Varianzbeitrag); analog ist eine MAE-Normierung möglich.
-
-    Example
-    -------
-    >>> shap_folds_df = _fold_normalize(shap_folds_df, "fold", "mean_abs_shap", "rel_mean_abs_shap")
-    >>> pi_folds_df   = _fold_normalize(pi_folds_df, "fold", "delta_R2",      "rel_delta_R2")
-    """
-    out = df.copy()
-    sums = out.groupby(fold_col)[value_col].transform("sum").replace(0, np.nan)
-    out[rel_col] = (out[value_col] / sums).fillna(0.0)
-    return out
-
-
 def run_explain_over_splits(
     X_df: pd.DataFrame,
     y: np.ndarray,
     make_model,  # callable -> unfit model (EN/RF/...)
-    shap_kind: str = "auto",  # "linear", "tree", "auto"
-    compute_shap: bool = True,
     compute_pi: bool = True,
     test_size: int = 30,
     hp_train_frac: float = 0.3,
@@ -806,12 +745,12 @@ def run_explain_over_splits(
 ):
     """
     Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
-    SHAP-Analyse und (blockierter) Permutation Importance auf dem Testfenster.
+    (blockierter) Permutation Importance auf dem Testfenster.
 
     Für eine chronologisch sortierte Tagesreihe erzeugt die Funktion Rolling-Origin-Splits
     (Expanding per Default), trainiert je Fold eine Preprocessing+Modell-Pipeline auf dem
     Trainingsfenster, evaluiert auf dem Testfenster (R²/MAE) und berechnet optional
-    SHAP-Attributionen sowie blockierte Permutation Importances. Zusätzlich kann eine
+    blockierte Permutation Importances. Zusätzlich kann eine
     gruppenweise PI (z. B. HRV/ACT/COMM/SLEEP) berechnet werden, um Quellen-Anteile
     direkt zu erhalten (für 100%-Plots und statistische Tests).
 
@@ -823,10 +762,6 @@ def run_explain_over_splits(
         Zielvektor gleicher Länge wie X_df.
     make_model : callable
         Fabrikfunktion, die einen **ungefitten** Estimator/Pipeline zurückgibt (z. B. ElasticNet).
-    shap_kind : {"auto","linear","tree"}, optional
-        SHAP-Backend-Auswahl; "auto" versucht kompatible Explainer zu wählen.
-    compute_shap : bool, optional
-        Ob pro Fold SHAP-Werte auf dem Testfenster berechnet werden.
     compute_pi : bool, optional
         Ob pro Fold Permutation Importances berechnet werden (Feature-weise + Gruppen-weise).
     test_size : int, optional
@@ -840,7 +775,7 @@ def run_explain_over_splits(
     fixed_scaler : StandardScaler | None, optional
         Optionaler, bereits gefitteter globaler StandardScaler, der **in allen Folds
         unverändert** auf Train/Test angewandt wird (für konsistente Feature-Skalen
-        und damit vergleichbare SHAP/PI über Folds). Falls None, wird kein fixer
+        und damit vergleichbare PI über Folds). Falls None, wird kein fixer
         Scaler genutzt (d. h. Preprocessing wird nur auf Train gefittet).
 
     Returns
@@ -848,8 +783,6 @@ def run_explain_over_splits(
     dict
         {
           "fold_metrics_df":  DataFrame mit R²/MAE je Fold,
-          "shap_folds_df":    DataFrame mit (fold, feature, mean_abs_shap, mean_signed_shap) oder None,
-          "shap_summary_df":  Median-aggregation über Folds oder None,
           "pi_folds_df":      DataFrame mit (fold, feature, delta_R2, delta_MAE) oder None,
           "pi_summary_df":    Median-aggregation über Folds oder None,
           "pi_groups_folds_df":   DataFrame mit (fold, group, delta_R2_mean, delta_MAE_mean, rel_*) oder None,
@@ -862,8 +795,8 @@ def run_explain_over_splits(
     - Permutation erfolgt **blockweise** (CONFIG["pi"]["block_len"]), um Autokorrelation/Seasonality zu respektieren.
     - Gruppen-PI erwartet CONFIG["feature_groups"] als Mapping {gruppe: [features]} (z. B. COARSE_GROUPS oder DAY_NIGHT_GROUPS).
     - Für 100%-Plots: pro Fold die Gruppen-Importanzen relativieren (Summe = 1), dann über Folds/Personen mitteln (Median + IQR).
-    - SHAP/PI werden für 100%-Darstellungen fold-normalisiert (Summe je Fold = 1):
-        SHAP: rel_mean_abs_shap; PI: rel_delta_R2.
+    - PI werden für 100%-Darstellungen fold-normalisiert (Summe je Fold = 1):
+        PI: rel_delta_R2.
         Die Summary-Tabellen basieren auf Medianen dieser relativen Werte, was robuste, vergleichbare Aggregation
         über Folds (und später über Personen) erlaubt.
 
@@ -872,7 +805,7 @@ def run_explain_over_splits(
     >>> CONFIG["pi"] = {"block_len": 7, "n_repeats": 50}
     >>> CONFIG["feature_groups"] = COARSE_GROUPS   # oder DAY_NIGHT_GROUPS
     >>> res = run_explain_over_splits(
-    ...     X_df, y, make_model=make_en_pipeline, compute_shap=True, compute_pi=True,
+    ...     X_df, y, make_model=make_en_pipeline, compute_pi=True,
     ...     n_splits=5, test_size=14, min_train_size=90, random_state=42
     ... )
     >>> res["pi_groups_summary_df"].head()
@@ -889,7 +822,6 @@ def run_explain_over_splits(
 
     rng = np.random.default_rng(random_state)
     fold_rows = []
-    shap_rows = []
     pi_rows = []
     pi_group_rows = []
 
@@ -922,37 +854,6 @@ def run_explain_over_splits(
                 "test_end_idx": int(te[-1]),
             }
         )
-
-        # --- SHAP
-        if compute_shap:
-            try:
-                if shap_kind == "linear":
-                    explainer = shap.LinearExplainer(model, Xt_tr)
-                    shap_vals = explainer.shap_values(Xt_te)
-                elif shap_kind == "tree":
-                    explainer = shap.TreeExplainer(model)
-                    shap_vals = explainer.shap_values(Xt_te)
-                else:
-                    expl = shap.Explainer(model, Xt_tr)
-                    expl_out = expl(Xt_te)
-                    shap_vals = getattr(expl_out, "values", expl_out)
-            except Exception:
-                expl = shap.Explainer(model, Xt_tr)
-                expl_out = expl(Xt_te)
-                shap_vals = getattr(expl_out, "values", expl_out)
-
-            cols = [str(c).split("__")[-1] for c in list(Xt_te.columns)]
-            mean_abs = np.abs(shap_vals).mean(axis=0)
-            mean_signed = np.asarray(shap_vals).mean(axis=0)
-            for f, a, s in zip(cols, mean_abs, mean_signed):
-                shap_rows.append(
-                    {
-                        "fold": fold_id,
-                        "feature": f,
-                        "mean_abs_shap": float(a),
-                        "mean_signed_shap": float(s),
-                    }
-                )
 
         # --- Permutation Importance – auf Testfenster pro Block pro Feture
         if compute_pi:
@@ -1005,34 +906,6 @@ def run_explain_over_splits(
     # Ergebnisse zusammenfassen
     fold_metrics_df = pd.DataFrame(fold_rows)
 
-    shap_folds_df = pd.DataFrame(shap_rows) if compute_shap else None
-    shap_summary_df = (
-        (
-            shap_folds_df.groupby("feature")[["mean_abs_shap", "mean_signed_shap"]]
-            .median()
-            .sort_values("mean_abs_shap", ascending=False)
-            .reset_index()
-        )
-        if compute_shap and not shap_folds_df.empty
-        else None
-    )
-
-    if compute_shap and shap_folds_df is not None and not shap_folds_df.empty:
-        shap_folds_df = _fold_normalize(
-            shap_folds_df,
-            fold_col="fold",
-            value_col="mean_abs_shap",
-            rel_col="rel_mean_abs_shap",
-        )
-        shap_summary_df = (
-            shap_folds_df.groupby("feature")[["rel_mean_abs_shap", "mean_signed_shap"]]
-            .median()
-            .sort_values("rel_mean_abs_shap", ascending=False)
-            .reset_index()
-        )
-    else:
-        shap_summary_df = None
-
     pi_folds_df = pd.DataFrame(pi_rows) if compute_pi else None
     pi_summary_df = (
         (
@@ -1065,8 +938,6 @@ def run_explain_over_splits(
 
     return {
         "fold_metrics_df": fold_metrics_df,
-        "shap_folds_df": shap_folds_df,
-        "shap_summary_df": shap_summary_df,
         "pi_folds_df": pi_folds_df,
         "pi_summary_df": pi_summary_df,
         "pi_groups_folds_df": pi_groups_folds_df,
@@ -1085,20 +956,6 @@ def save_explain_outputs(
     if fm is not None and not fm.empty:
         fm.to_csv(
             os.path.join(results_dir, f"{pseudonym}_{model_tag}_fold_metrics.csv"),
-            index=False,
-        )
-
-    # SHAP
-    sf = res_dict.get("shap_folds_df", None)
-    ss = res_dict.get("shap_summary_df", None)
-    if sf is not None and not sf.empty:
-        sf.to_csv(
-            os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_folds.csv"),
-            index=False,
-        )
-    if ss is not None and not ss.empty:
-        ss.to_csv(
-            os.path.join(results_dir, f"{pseudonym}_{model_tag}_shap_summary.csv"),
             index=False,
         )
 
@@ -1152,7 +1009,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     ensure_results_dir()
 
-    for pseudonym in pseudonyms:
+    for pseudonym in ["bubblypie2"]:
         print("========================================")
         print(f"Processing {pseudonym}")
         print("========================================")
@@ -1234,7 +1091,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         print(f"[Init-HP] EN alpha={best_alpha:.4g}, l1_ratio={best_l1}")
 
-        # =================== ELASTIC NET: (fixe HP aus Startfenster) + SHAP ====================
+        # =================== ELASTIC NET: (fixe HP aus Startfenster) ====================
         print("[EN] Fit mit fixen HP (aus Startfenster) ...")
 
         # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
@@ -1347,28 +1204,10 @@ def process_participants(df_raw, pseudonyms, target_column):
         except Exception as e:
             print("[EN][DEBUG] Feature-Std-Check skipped:", repr(e))
 
-        # --- SHAP auf preprocessed Matrizen
-        try:
-            en_explainer = shap.LinearExplainer(model_en, Xt_train_en)
-            en_shap_values = en_explainer.shap_values(Xt_test_en)
-        except Exception:
-            expl = shap.Explainer(model_en, Xt_train_en)
-            out = expl(Xt_test_en)
-            en_shap_values = getattr(out, "values", out)
-
         print(
             f"EN R2={r2_elastic}, MAE={mae_elastic}, alpha={best_alpha}, l1_ratio={best_l1}"
         )
         print("EN # nonzero betas:", np.count_nonzero(model_en.coef_))
-        print("mean(|SHAP|):", float(np.nanmean(np.abs(en_shap_values))))
-
-        # Feature-Namen (falls DataFrame-DesignMatrix)
-        en_feat_names = [
-            str(c).split("__")[-1] for c in list(getattr(X_train_df, "columns", []))
-        ] or [f"f{i}" for i in range(Xt_test_en.shape[1])]
-        plot_shap_summary_and_bar(
-            RESULTS_DIR, en_shap_values, Xt_test_en, en_feat_names, f"{pseudonym}_EN"
-        )
 
         # Modelle speichern
         joblib.dump(
@@ -1414,19 +1253,9 @@ def process_participants(df_raw, pseudonyms, target_column):
         r2_rf = round(r2_score(y_test, y_pred_rf), 2)
         mae_rf = round(mean_absolute_error(y_test, y_pred_rf), 1)
 
-        rf_explainer = shap.TreeExplainer(model_rf)
-        rf_shap_values = rf_explainer.shap_values(Xt_test_rf)
-        rf_feat_names = [
-            str(c).split("__")[-1] for c in list(getattr(X_train_df, "columns", []))
-        ] or [f"f{i}" for i in range(Xt_test_rf.shape[1])]
-        plot_shap_summary_and_bar(
-            RESULTS_DIR, rf_shap_values, Xt_test_rf, rf_feat_names, f"{pseudonym}_RF"
-        )
-
         print(
             f"RF R2={r2_rf}, MAE={mae_rf}, n_estimators={model_rf.n_estimators}, max_depth={model_rf.max_depth}, min_samples_leaf={model_rf.min_samples_leaf}"
         )
-        print("mean(|SHAP|):", float(np.nanmean(np.abs(rf_shap_values))))
         # Modelle speichern
         joblib.dump(
             {"pre": pp, "scaler": fixed_scaler, "model": model_rf},
@@ -1452,9 +1281,28 @@ def process_participants(df_raw, pseudonyms, target_column):
         timestamps_model = (
             df_participant.loc[mask_valid, "timestamp_utc"].astype(str).tolist()
         )
+        adherence = (
+            df_participant.loc[
+                mask_valid,
+                [
+                    "number_used_ibi_datapoints_rq1_day",
+                    "number_used_ibi_datapoints_rq1_night",
+                ],
+            ].sum(axis=1)
+            / df_participant.loc[
+                mask_valid,
+                [
+                    "number_used_ibi_datapoints_rq1_day",
+                    "number_used_ibi_datapoints_rq1_night",
+                ],
+            ]
+            .sum(axis=1)
+            .max()
+        )
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
             "phq2_raw": y.tolist(),
+            "adherence": adherence.tolist(),
             "train_mask": [i < split for i in range(n)],
             "test_mask": [i >= split for i in range(n)],
             "elastic": {
@@ -1495,8 +1343,8 @@ def process_participants(df_raw, pseudonyms, target_column):
             "rf_best_min_samples_leaf": model_rf.min_samples_leaf,
         }
 
-        # ==================== Rolling PI & Rolling SHAP ========================
-        print("  [EN] Rolling PI/SHAP ...")
+        # ==================== Rolling PI ========================
+        print("  [EN] Rolling PI ...")
 
         make_en = lambda: ElasticNet(
             alpha=best_alpha,
@@ -1510,18 +1358,16 @@ def process_participants(df_raw, pseudonyms, target_column):
             X_df=X,
             y=y,
             make_model=make_en,
-            shap_kind="linear",
-            compute_shap=True,
             compute_pi=True,
-            test_size=CONFIG["shap"]["test_size"],
+            test_size=CONFIG["pi"]["test_size"],
             hp_train_frac=CONFIG["init_frac_for_hp"],
-            embargo=CONFIG["shap"]["embargo"],
+            embargo=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_scaler=fixed_scaler,
         )
 
-        print("  [RF] Rolling PI/SHAP ...")
+        print("  [RF] Rolling PI ...")
 
         def make_rf():
             return RandomForestRegressor(
@@ -1542,12 +1388,10 @@ def process_participants(df_raw, pseudonyms, target_column):
             X_df=X,
             y=y,
             make_model=make_rf,
-            shap_kind="tree",
-            compute_shap=True,
             compute_pi=True,
-            test_size=CONFIG["shap"]["test_size"],
+            test_size=CONFIG["pi"]["test_size"],
             hp_train_frac=CONFIG["init_frac_for_hp"],
-            embargo=CONFIG["shap"]["embargo"],
+            embargo=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
             fixed_scaler=fixed_scaler,
@@ -1558,20 +1402,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         save_explain_outputs(res_rf, RESULTS_DIR, pseudonym, "RF")
 
         # ============== Zusammenfassungs-Plots (Top-K) ==============
-        # EN – SHAP/PI Bars
-        if (
-            res_en.get("shap_summary_df") is not None
-            and not res_en["shap_summary_df"].empty
-        ):
-            plot_importance_bars(
-                res_en["shap_summary_df"],
-                "rel_mean_abs_shap",
-                title=f"{pseudonym} EN – SHAP (median über Folds)",
-                outpath=os.path.join(
-                    RESULTS_DIR, f"{pseudonym}_EN_shap_summary_bar.png"
-                ),
-                top_k=TOP_K,
-            )
+        # EN – PI Bars
         if (
             res_en.get("pi_summary_df") is not None
             and not res_en["pi_summary_df"].empty
@@ -1584,20 +1415,7 @@ def process_participants(df_raw, pseudonyms, target_column):
                 top_k=TOP_K,
             )
 
-        # RF – SHAP/PI Bars
-        if (
-            res_rf.get("shap_summary_df") is not None
-            and not res_rf["shap_summary_df"].empty
-        ):
-            plot_importance_bars(
-                res_rf["shap_summary_df"],
-                "rel_mean_abs_shap",
-                title=f"{pseudonym} RF – SHAP (median über Folds)",
-                outpath=os.path.join(
-                    RESULTS_DIR, f"{pseudonym}_RF_shap_summary_bar.png"
-                ),
-                top_k=TOP_K,
-            )
+        # RF – PI Bars
         if (
             res_rf.get("pi_summary_df") is not None
             and not res_rf["pi_summary_df"].empty
@@ -1688,6 +1506,7 @@ plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="elastic")
 plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="rf")
 
 plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "elastic")
+plot_phq2_timeseries_with_adherence_from_results(RESULTS_DIR, plot_data, "elastic")
 plot_phq2_test_errors_from_results(
     RESULTS_DIR, plot_data, "elastic", show_pred_ci=False
 )

@@ -33,7 +33,7 @@ CONFIG = {
         "phq2": "abend_PHQ2_sum",
         "phq9": "woche_PHQ9_sum",
     },
-    # Anteil Startfenster für HP-Tuning und Fix-Scaler-Fit
+    # Anteil Startfenster für HP-Tuning und Pipeline-Fit
     "init_frac_for_hp": 0.70,
     # GridSearchCV (TimeSeriesSplit)
     "cv_n_splits": 5,
@@ -321,11 +321,6 @@ def preprocess_pipeline():
     sklearn.Pipeline
         Pipeline ohne den globalen, fixen StandardScaler.
 
-    Notes
-    -----
-    - Der globale, fixe Scaler (falls genutzt) wird separat bereitgestellt.
-    - So bleiben β mit fixem Scaler über Zeit vergleichbar, während
-      Imputation & per-Feature-Skalierung weiterhin train-only bleiben.
     """
     # Beispiel: baue hier deine bisherigen Steps OHNE finalen globalen StandardScaler
     # (Passe an deine realen Step-Namen/Objekte an!)
@@ -344,71 +339,6 @@ def preprocess_pipeline():
             ("standard_scaler", StandardScaler()),
         ]
     )
-
-
-def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> int:
-    """
-    Bestimmt das Ende des Startfensters für HP-Tuning & Fix-Scaler-Fit.
-
-    Nimmt den größeren der beiden Werte: floor(frac * n_samples) und min_train_size,
-    damit das Startfenster groß genug für stabiles Tuning/Scaling ist.
-
-    Parameters
-    ----------
-    n_samples : int
-        Anzahl der Zeilen (Tage).
-    frac : float
-        Anteil (z. B. 0.30 für 30 %).
-    min_train_size : int
-        Untergrenze in Tagen.
-
-    Returns
-    -------
-    int
-        Exklusiver Endindex (Python-Slicing) des Startfensters.
-
-    Notes
-    -----
-    - Typischerweise 30 % oder min_train_size, was immer größer ist.
-    """
-    import math
-
-    return max(int(math.floor(frac * n_samples)), int(min_train_size))
-
-
-def ensure_var_in_init(y, init_end, min_var=1e-3, step_days=14, max_frac=0.5):
-    """
-    Erweitert das Startfenster iterativ, bis Var(y) >= min_var oder max_frac erreicht.
-
-    Wenn die Zielvarianz im Startfenster zu klein ist (Nullmodell-Risiko),
-    wird init_end in Schritten (step_days) erhöht, bis mindestens min_var
-    erreicht ist oder höchstens max_frac * len(y) genutzt wurden.
-
-    Parameters
-    ----------
-    y : array-like
-        Zielreihe (nach Maskierung, Länge = n).
-    init_end : int
-        Aktuelles Ende des Startfensters (exklusiv).
-    min_var : float
-        Minimale Varianzschwelle.
-    step_days : int
-        Schrittweite zur Erweiterung (Tage).
-    max_frac : float
-        Obergrenze als Anteil der Gesamtlänge.
-
-    Returns
-    -------
-    int
-        Neues init_end.
-    """
-    import numpy as np
-
-    n = len(y)
-    max_end = int(max_frac * n)
-    while np.var(y[:init_end]) < min_var and (init_end + step_days) <= max_end:
-        init_end += step_days
-    return init_end
 
 
 # %%  PERMUTATION-IMPORTANCE (modell-agnostisch) =========================
@@ -449,65 +379,6 @@ def permutation_importance_per_feature(
         .sort_values("delta_R2", ascending=False)
         .reset_index(drop=True)
     )
-
-
-def run_feature_permutation_importance_over_splits(
-    X_df: pd.DataFrame,
-    y: np.ndarray,
-    test_size: int,
-    hp_train_frac: float,
-    embargo: int,
-    estimator: BaseEstimator,  # bereits mit finalen HP konfiguriert
-    n_repeats: int = 50,
-    agg: str = "mean",
-    random_state: int = 42,
-    fixed_preprocess_pipeline: Pipeline | None = None,
-):
-    n = len(y)
-    splits = rolling_origin_splits(
-        n_samples=n,
-        test_size=test_size,
-        hp_train_frac=hp_train_frac,
-        embargo=embargo,
-        step_train=30,
-        min_test_size=5,
-    )
-
-    all_rows = []
-    for fold_id, (tr, te) in enumerate(splits, start=1):
-        Xt_tr = fixed_preprocess_pipeline.fit_transform(X_df.iloc[tr])
-        Xt_te = fixed_preprocess_pipeline.transform(X_df.iloc[te])
-
-        est = clone(estimator)
-        est.fit(Xt_tr, y[tr])
-
-        df_imp = permutation_importance_per_feature(
-            fitted_estimator=est,
-            X_test=Xt_te,
-            y_test=y[te],
-            n_repeats=n_repeats,
-            random_state=random_state,
-        )
-        df_imp["fold"] = fold_id
-        all_rows.append(df_imp)
-
-    if not all_rows:
-        return pd.DataFrame(), pd.DataFrame()
-
-    imp_folds = pd.concat(all_rows, ignore_index=True)
-
-    if agg == "median":
-        agg_fun = "median"
-    else:
-        agg_fun = "mean"
-
-    imp_summary = (
-        imp_folds.groupby("feature")[["delta_R2", "delta_MAE"]]
-        .agg(agg_fun)
-        .sort_values("delta_R2", ascending=False)
-        .reset_index()
-    )
-    return imp_folds, imp_summary
 
 
 def permutation_importance_by_group(

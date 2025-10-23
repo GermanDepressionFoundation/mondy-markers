@@ -1,9 +1,11 @@
 import os
 
-os.environ["MPLBACKEND"] = "Agg"   # muss vor matplotlib-Import passieren
+os.environ["MPLBACKEND"] = "Agg"  # muss vor matplotlib-Import passieren
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 plt.ioff()  # interaktiven Modus deaktivieren
 
 import numpy as np
@@ -287,8 +289,8 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
             len(d["timestamps"]),
             len(d["phq2_raw"]),
             len(d[model_key]["pred"]),
-            #len(d[model_key]["lower"]),
-            #len(d[model_key]["upper"]),
+            # len(d[model_key]["lower"]),
+            # len(d[model_key]["upper"]),
             len(d["train_mask"]),
         )
 
@@ -297,8 +299,9 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                #"lower": d[model_key]["lower"][:n],
-                #"upper": d[model_key]["upper"][:n],
+                "adherence": d["adherence"][:n],
+                # "lower": d[model_key]["lower"][:n],
+                # "upper": d[model_key]["upper"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
             }
         ).sort_values("ts")
@@ -385,6 +388,149 @@ def plot_phq2_timeseries_from_results(results_dir, plot_data, model_key="rf"):
         print(f"[Info] Plot gespeichert: {out_path}")
 
 
+def plot_phq2_timeseries_with_adherence_from_results(
+    results_dir, plot_data, model_key="rf"
+):
+    """
+    Plot two vertically stacked subplots per participant:
+      (1) PHQ-2 raw data (train/test) + model predictions
+      (2) Adherence trend (as percentage if 0–1 values are given)
+
+    Saves one PNG per participant into <results_dir>/timeseries/.
+    """
+
+    save_dir = f"{results_dir}/timeseries"
+    os.makedirs(save_dir, exist_ok=True)
+
+    for pseudo, d in plot_data.items():
+        if model_key not in d or "adherence" not in d:
+            continue
+
+        # -------- align lengths safely -----------------------------------
+        n = min(
+            len(d["timestamps"]),
+            len(d["phq2_raw"]),
+            len(d[model_key]["pred"]),
+            len(d["train_mask"]),
+            len(d["adherence"]),
+        )
+        if n == 0:
+            continue
+
+        df = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(d["timestamps"][:n]),
+                "PHQ2": d["phq2_raw"][:n],
+                "pred": d[model_key]["pred"][:n],
+                "adherence": d["adherence"][:n],
+                "is_train": np.array(d["train_mask"][:n], dtype=bool),
+            }
+        ).sort_values("ts")
+
+        # --- colors & markers --------------------------------------------
+        c_train = PLOT_STYLES["colors"]["Rohdaten_train"]
+        c_test = PLOT_STYLES["colors"]["Rohdaten_test"]
+        pred_color = (
+            PLOT_STYLES["colors"]["Elasticnet"]
+            if model_key == "elastic"
+            else PLOT_STYLES["colors"]["RF"]
+        )
+        adherence_color = PLOT_STYLES["colors"].get("Adherence", "#6A5ACD")
+        m_train, m_test = "o", "s"
+
+        # --- build figure with two stacked axes --------------------------
+        fig, (ax1, ax2) = plt.subplots(
+            2,
+            1,
+            figsize=(10, 7),
+            sharex=True,
+            gridspec_kw={"height_ratios": [2.5, 1.0], "hspace": 0.05},
+        )
+
+        # ===============================================================
+        #  TOP: PHQ-2 raw data and model prediction
+        # ===============================================================
+        ax1.plot(
+            df["ts"],
+            df["PHQ2"].where(df["is_train"], np.nan),
+            color=c_train,
+            lw=1.3,
+            label="Raw data (Train)",
+        )
+        ax1.plot(
+            df["ts"],
+            df["PHQ2"].where(~df["is_train"], np.nan),
+            color=c_test,
+            lw=1.3,
+            label="Raw data (Test)",
+        )
+
+        # markers
+        ax1.scatter(
+            df.loc[df["is_train"], "ts"],
+            df.loc[df["is_train"], "PHQ2"],
+            color=c_train,
+            marker=m_train,
+            s=28,
+        )
+        ax1.scatter(
+            df.loc[~df["is_train"], "ts"],
+            df.loc[~df["is_train"], "PHQ2"],
+            color=c_test,
+            marker=m_test,
+            s=28,
+        )
+
+        # prediction line
+        ax1.plot(
+            df["ts"],
+            df["pred"],
+            color=pred_color,
+            lw=1.6,
+            label=f"{model_key.upper()}-Pred",
+        )
+
+        ax1.set_ylim(0, 21)
+        ax1.set_ylabel("PHQ-2 score")
+        ax1.legend(loc="upper left")
+        ax1.set_title(f"{pseudo} – PHQ-2 Trend ({model_key.upper()})")
+
+        # ===============================================================
+        #  BOTTOM: adherence
+        # ===============================================================
+        adh = pd.to_numeric(df["adherence"], errors="coerce")
+        if np.nanmax(adh) <= 1.0:
+            adh_plot = adh * 100.0
+            y_label = "Adherence (%)"
+        else:
+            adh_plot = adh
+            y_label = "Adherence"
+
+        ax2.plot(df["ts"], adh_plot, color=adherence_color, lw=1.2, label="Adherence")
+        ax2.fill_between(
+            df["ts"], adh_plot, step=None, alpha=0.1, color=adherence_color
+        )
+
+        if "Adherence (%)" in y_label:
+            ax2.set_ylim(0, 100)
+        ax2.set_ylabel(y_label)
+        ax2.set_xlabel("Date")
+        ax2.legend(loc="upper left")
+
+        # ===============================================================
+        #  Final layout and export
+        # ===============================================================
+        for ax in (ax1, ax2):
+            ax.grid(True, which="major", axis="y", linestyle="--", alpha=0.3)
+
+        fig.tight_layout()
+        out_path = f"{save_dir}/{pseudo}_{model_key}_stacked.png"
+        add_logo_to_figure(fig)
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+        print(f"[Info] Plot gespeichert: {out_path}")
+
+
 def plot_phq2_test_errors_from_results(
     results_dir, plot_data, model_key="rf", show_pred_ci=True
 ):
@@ -410,8 +556,8 @@ def plot_phq2_test_errors_from_results(
                 "ts": pd.to_datetime(d["timestamps"][:n]),
                 "PHQ2": d["phq2_raw"][:n],
                 "pred": d[model_key]["pred"][:n],
-                #"lower": d[model_key]["lower"][:n],
-                #"upper": d[model_key]["upper"][:n],
+                # "lower": d[model_key]["lower"][:n],
+                # "upper": d[model_key]["upper"][:n],
                 "is_train": np.array(d["train_mask"][:n], dtype=bool),
             }
         ).sort_values("ts")
@@ -510,17 +656,19 @@ def plot_phq2_test_errors_from_results(
         plt.close()
         print(f"[Info] Test-only plot saved: {out_path}")
 
+
 def tss_indices(n_samples: int, n_splits: int = 5):
     tscv = TimeSeriesSplit(n_splits=n_splits)
     for fold, (tr, te) in enumerate(tscv.split(np.arange(n_samples)), start=1):
         yield fold, tr, te
+
 
 def plot_tss(n_samples: int = 365, n_splits: int = 5, gap: int = 0):
     """
     Visualisiert TimeSeriesSplit: Train (blau), Embargo/GAP (grau, optional), Test (orange).
     GAP wird nur im Plot gezeigt – sklearn setzt ihn nicht automatisch um.
     """
-    fig, ax = plt.subplots(figsize=(10, 1 + 0.4*n_splits))
+    fig, ax = plt.subplots(figsize=(10, 1 + 0.4 * n_splits))
     y = 0
     for fold, tr, te in tss_indices(n_samples, n_splits):
         # optionaler GAP/Embargo (nur Visualisierung)
@@ -531,10 +679,31 @@ def plot_tss(n_samples: int = 365, n_splits: int = 5, gap: int = 0):
         else:
             gap_idx = np.array([], dtype=int)
 
-        ax.plot(tr, np.full_like(tr, y), "|", markersize=10, label="Train" if fold==1 else "", color="tab:blue")
+        ax.plot(
+            tr,
+            np.full_like(tr, y),
+            "|",
+            markersize=10,
+            label="Train" if fold == 1 else "",
+            color="tab:blue",
+        )
         if gap_idx.size > 0:
-            ax.plot(gap_idx, np.full_like(gap_idx, y), "|", markersize=10, label="GAP" if fold==1 else "", color="0.7")
-        ax.plot(te, np.full_like(te, y), "|", markersize=10, label="Test" if fold==1 else "", color="tab:orange")
+            ax.plot(
+                gap_idx,
+                np.full_like(gap_idx, y),
+                "|",
+                markersize=10,
+                label="GAP" if fold == 1 else "",
+                color="0.7",
+            )
+        ax.plot(
+            te,
+            np.full_like(te, y),
+            "|",
+            markersize=10,
+            label="Test" if fold == 1 else "",
+            color="tab:orange",
+        )
         ax.text(n_samples + 3, y, f"Fold {fold}", va="center", fontsize=9)
         y += 1
 
@@ -547,6 +716,7 @@ def plot_tss(n_samples: int = 365, n_splits: int = 5, gap: int = 0):
     plt.tight_layout()
     plt.show()
 
+
 def plot_fold_metrics(df_metrics, out_dir, pseudonym, model_label):
     # x-Achse: Datum (falls vorhanden), sonst Fold-Nummer
     if df_metrics["fold_end_ts"].notna().any():
@@ -556,15 +726,31 @@ def plot_fold_metrics(df_metrics, out_dir, pseudonym, model_label):
         x = df_metrics["fold"]
         xlab = "Fold"
 
-    plt.figure(figsize=(8,4.5))
+    plt.figure(figsize=(8, 4.5))
     plt.plot(x, df_metrics["r2"], marker="o", label=f"{model_label} R²")
-    plt.plot(x, df_metrics["r2_baseline_last"], marker="x", linestyle="--", label="Baseline (last) R²")
-    plt.plot(x, df_metrics["r2_baseline_mean"], marker="x", linestyle=":",  label="Baseline (mean) R²")
+    plt.plot(
+        x,
+        df_metrics["r2_baseline_last"],
+        marker="x",
+        linestyle="--",
+        label="Baseline (last) R²",
+    )
+    plt.plot(
+        x,
+        df_metrics["r2_baseline_mean"],
+        marker="x",
+        linestyle=":",
+        label="Baseline (mean) R²",
+    )
     plt.axhline(0.0, color="gray", linewidth=1)
     plt.title(f"{pseudonym}: R² über Folds – {model_label}")
-    plt.xlabel(xlab); plt.ylabel("R²"); plt.legend(); plt.tight_layout()
+    plt.xlabel(xlab)
+    plt.ylabel("R²")
+    plt.legend()
+    plt.tight_layout()
     fn = os.path.join(out_dir, f"{pseudonym}_{model_label}_fold_r2.png")
-    plt.savefig(fn, dpi=150); plt.close()
+    plt.savefig(fn, dpi=150)
+    plt.close()
 
 
 def plot_timeseries_with_folds(
@@ -589,8 +775,8 @@ def plot_timeseries_with_folds(
         if len(te) == 0:
             continue
         start_ts = ts.iloc[te[0]]
-        end_ts   = ts.iloc[te[-1]]
-        mid_ts   = start_ts + (end_ts - start_ts) / 2
+        end_ts = ts.iloc[te[-1]]
+        mid_ts = start_ts + (end_ts - start_ts) / 2
 
         # Testbereich einfärben
         ax.axvspan(start_ts, end_ts, color="tab:orange", alpha=0.18)
@@ -598,13 +784,16 @@ def plot_timeseries_with_folds(
         # Metriken aus df
         row = metrics_df.loc[metrics_df["fold"] == fold_id]
         if not row.empty:
-            r2  = row["r2"].values[0]
+            r2 = row["r2"].values[0]
             mae = row["mae"].values[0]
             ax.text(
-                mid_ts, y_annot,
+                mid_ts,
+                y_annot,
                 f"Fold {fold_id}\nR²={r2:.2f}, MAE={mae:.2f}",
-                ha="center", va="bottom", fontsize=8,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.8)
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.8),
             )
 
     ax.set_title(title)
@@ -617,11 +806,15 @@ def plot_timeseries_with_folds(
     plt.close(fig)
 
     # >>> NEW: Balkenplots für Summaries (SHAP/PI)
-def plot_importance_bars(summary_df: pd.DataFrame, value_col: str, title: str, outpath: str, top_k: int = 15):
+
+
+def plot_importance_bars(
+    summary_df: pd.DataFrame, value_col: str, title: str, outpath: str, top_k: int = 15
+):
     if summary_df is None or summary_df.empty:
         return
     dfp = summary_df.sort_values(value_col, ascending=False).head(top_k)
-    plt.figure(figsize=(8, max(3, 0.35*len(dfp))))
+    plt.figure(figsize=(8, max(3, 0.35 * len(dfp))))
     plt.barh(dfp["feature"][::-1], dfp[value_col][::-1])
     plt.title(title)
     plt.tight_layout()
@@ -657,8 +850,15 @@ def plot_folds_on_timeseries(
             continue
         ax.axvspan(timestamps.iloc[ts], timestamps.iloc[te], color="orange", alpha=0.18)
         xm = timestamps.iloc[(ts + te) // 2]
-        ax.text(xm, label_y, f'R²={row["r2"]:.2f}, MAE={row["mae"]:.2f}',
-                ha="center", va="bottom", fontsize=9, rotation=0)
+        ax.text(
+            xm,
+            label_y,
+            f'R²={row["r2"]:.2f}, MAE={row["mae"]:.2f}',
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            rotation=0,
+        )
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")

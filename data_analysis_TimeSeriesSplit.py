@@ -39,8 +39,6 @@ CONFIG = {
     "cv_n_splits": 5,
     # Gap/Embargo in TimeSeriesSplit für CV
     "cv_embargo": 1,
-    # globalen Scaler einmal im Startfenster fitten?
-    "use_fixed_scaler": True,
     # Elastic Net
     "en": {
         "scoring": "r2",  # "neg_mean_absolute_error" # MAE vs. r2:  r2 "bestraft" mehr konstante verläufe.
@@ -310,7 +308,7 @@ def rolling_origin_splits(
     return splits
 
 
-def impute_pipeline():
+def preprocess_pipeline():
     """
     Preprocessing-Schritte, die pro Fold auf dem Trainingsfenster gefittet werden.
 
@@ -341,43 +339,11 @@ def impute_pipeline():
                     random_state=CONFIG["random_state"],
                     keep_empty_features=True,
                 ),
-            )
+            ),
+            ("per_feature_scalers", pre_scalers),
+            ("standard_scaler", StandardScaler()),
         ]
     )
-
-
-def fit_fixed_global_scaler(
-    X_init_preprocessed: pd.DataFrame, include_global_center: bool = True
-) -> Pipeline:
-    """
-    Build & fit a FIXED scaler pipeline on the initial window that includes:
-      - your per-feature ColumnTransformer `pre_scalers`
-      - optional global mean-centering (StandardScaler with_std=False)
-
-    Parameters
-    ----------
-    X_init_preprocessed : pd.DataFrame
-        The initial window AFTER train-only preprocessing (e.g., imputation).
-        This ensures the fixed scalers see a stable, leakage-safe representation.
-    include_global_center : bool, default True
-        If True, add a global StandardScaler(with_mean=True, with_std=False)
-        to center features consistently over time.
-
-    Returns
-    -------
-    sklearn.pipeline.Pipeline
-        A fitted pipeline with steps:
-          [("per_feature_scalers", pre_scalers),
-           ("global_center", StandardScaler(with_mean=True, with_std=False))?]
-        Use .transform() ONLY in later folds (do not refit).
-    """
-    steps = [("per_feature_scalers", pre_scalers)]
-    if include_global_center:
-        steps.append(("global_center", StandardScaler(with_mean=True, with_std=False)))
-
-    fixed_scaler = Pipeline(steps, verbose=False)
-    fixed_scaler.fit(X_init_preprocessed)
-    return fixed_scaler
 
 
 def split_initial_window(n_samples: int, frac: float, min_train_size: int) -> int:
@@ -495,6 +461,7 @@ def run_feature_permutation_importance_over_splits(
     n_repeats: int = 50,
     agg: str = "mean",
     random_state: int = 42,
+    fixed_preprocess_pipeline: Pipeline | None = None,
 ):
     n = len(y)
     splits = rolling_origin_splits(
@@ -508,9 +475,8 @@ def run_feature_permutation_importance_over_splits(
 
     all_rows = []
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = impute_pipeline()
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])
-        Xt_te = pp.transform(X_df.iloc[te])
+        Xt_tr = fixed_preprocess_pipeline.fit_transform(X_df.iloc[tr])
+        Xt_te = fixed_preprocess_pipeline.transform(X_df.iloc[te])
 
         est = clone(estimator)
         est.fit(Xt_tr, y[tr])
@@ -741,7 +707,7 @@ def run_explain_over_splits(
     embargo: int = 0,
     n_repeats: int = 50,
     random_state: int = 42,
-    fixed_scaler: Pipeline | None = None,
+    fixed_preprocess_pipeline: Pipeline | None = None,
 ):
     """
     Expanding-/Rolling-Evaluation über zeitlich geordnete Splits mit optionaler
@@ -772,11 +738,10 @@ def run_explain_over_splits(
         Wiederholungen pro Feature/Gruppe für PI (Monte-Carlo-Schätzung).
     random_state : int, optional
         Seed für Reproduzierbarkeit (wird für Permutation verwendet).
-    fixed_scaler : StandardScaler | None, optional
-        Optionaler, bereits gefitteter globaler StandardScaler, der **in allen Folds
+    fixed_preprocess_pipeline : Pipeline | None, optional
+        Optionale, bereits gefittete Preprocessing-Pipeline, die **in allen Folds
         unverändert** auf Train/Test angewandt wird (für konsistente Feature-Skalen
-        und damit vergleichbare PI über Folds). Falls None, wird kein fixer
-        Scaler genutzt (d. h. Preprocessing wird nur auf Train gefittet).
+        und damit vergleichbare PI über Folds).
 
     Returns
     -------
@@ -826,13 +791,8 @@ def run_explain_over_splits(
     pi_group_rows = []
 
     for fold_id, (tr, te) in enumerate(splits, start=1):
-        pp = impute_pipeline()  # <<< statt preprocess_pipeline
-        Xt_tr = pp.fit_transform(X_df.iloc[tr])  # train-only fit
-        Xt_te = pp.transform(X_df.iloc[te])
-
-        if fixed_scaler is not None:  # <<< Fix-Scaler anwenden (nur transform)
-            Xt_tr = fixed_scaler.transform(Xt_tr)
-            Xt_te = fixed_scaler.transform(Xt_te)
+        Xt_tr = fixed_preprocess_pipeline.transform(X_df.iloc[tr])  # train-only fit
+        Xt_te = fixed_preprocess_pipeline.transform(X_df.iloc[te])
 
         # --- Modell fitten
         model = make_model()
@@ -1046,15 +1006,8 @@ def process_participants(df_raw, pseudonyms, target_column):
         print("baseline R2 =", r2_score(y_test, dum.predict(X_test_df)))
 
         # Train-only Preprocessing (Imputation) auf Startfenster
-        pp = impute_pipeline()
-        X_init_tr = pp.fit_transform(X_train_df)
-
-        fixed_scaler = None
-        if CONFIG["use_fixed_scaler"]:
-            fixed_scaler = fit_fixed_global_scaler(X_init_tr)
-            X_init_for_cv = fixed_scaler.transform(X_init_tr)
-        else:
-            X_init_for_cv = X_init_tr
+        pp = preprocess_pipeline()
+        X_init_for_cv = pp.fit_transform(X_train_df)
 
         en = ElasticNet(
             max_iter=CONFIG["en"]["max_iter"],
@@ -1097,7 +1050,6 @@ def process_participants(df_raw, pseudonyms, target_column):
         # --- PREPROCESSING: train-only pro Split fitten, danach optional Fix-Scaler anwenden
         Xt_train_en = X_init_for_cv
         Xt_test_en = pp.transform(X_test_df)
-        Xt_test_en = fixed_scaler.transform(Xt_test_en)
 
         # --- MODELL: ElasticNet mit fixen HP aus dem Startfenster
         model_en = ElasticNet(
@@ -1211,7 +1163,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         # Modelle speichern
         joblib.dump(
-            {"pre": pp, "scaler": fixed_scaler, "model": model_en},
+            {"pre": pp, "model": model_en},
             os.path.join(RESULTS_DIR, "models", f"{pseudonym}_elasticnet.joblib"),
         )
 
@@ -1242,7 +1194,6 @@ def process_participants(df_raw, pseudonyms, target_column):
 
         Xt_train_rf = X_init_for_cv
         Xt_test_rf = pp.transform(X_test_df)
-        Xt_test_rf = fixed_scaler.transform(Xt_test_rf)
 
         model_rf = RandomForestRegressor(
             random_state=RANDOM_STATE, **rf_best_params_plain
@@ -1258,7 +1209,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         )
         # Modelle speichern
         joblib.dump(
-            {"pre": pp, "scaler": fixed_scaler, "model": model_rf},
+            {"pre": pp, "model": model_rf},
             os.path.join(RESULTS_DIR, "models", f"{pseudonym}_rf.joblib"),
         )
 
@@ -1281,7 +1232,7 @@ def process_participants(df_raw, pseudonyms, target_column):
         timestamps_model = (
             df_participant.loc[mask_valid, "timestamp_utc"].astype(str).tolist()
         )
-        adherence = (
+        individual_adherence = (
             df_participant.loc[
                 mask_valid,
                 [
@@ -1299,31 +1250,37 @@ def process_participants(df_raw, pseudonyms, target_column):
             .sum(axis=1)
             .max()
         )
+        global_adherence = (
+            df_participant.loc[
+                mask_valid,
+                [
+                    "number_used_ibi_datapoints_rq1_day",
+                    "number_used_ibi_datapoints_rq1_night",
+                ],
+            ].sum(axis=1)
+            / df_raw[
+                [
+                    "number_used_ibi_datapoints_rq1_day",
+                    "number_used_ibi_datapoints_rq1_night",
+                ]
+            ]
+            .sum(axis=1)
+            .max()
+        )
         plot_data[pseudonym] = {
             "timestamps": timestamps_model,
             "phq2_raw": y.tolist(),
-            "adherence": adherence.tolist(),
+            "individual_adherence": individual_adherence.tolist(),
+            "global_adherence": global_adherence.tolist(),
             "train_mask": [i < split for i in range(n)],
             "test_mask": [i >= split for i in range(n)],
             "elastic": {
-                "pred": list(
-                    model_en.predict(
-                        fixed_scaler.transform(pp.transform(X))
-                        if fixed_scaler
-                        else pp.transform(X)
-                    )
-                ),
+                "pred": list(model_en.predict(pp.transform(X))),
                 "lower": None,
                 "upper": None,
             },
             "rf": {
-                "pred": list(
-                    model_rf.predict(
-                        fixed_scaler.transform(pp.transform(X))
-                        if fixed_scaler
-                        else pp.transform(X)
-                    )
-                ),
+                "pred": list(model_rf.predict(pp.transform(X))),
                 "lower": None,
                 "upper": None,
             },
@@ -1364,7 +1321,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             embargo=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
-            fixed_scaler=fixed_scaler,
+            fixed_preprocess_pipeline=pp,
         )
 
         print("  [RF] Rolling PI ...")
@@ -1394,7 +1351,7 @@ def process_participants(df_raw, pseudonyms, target_column):
             embargo=CONFIG["pi"]["embargo"],
             n_repeats=CONFIG["pi"]["n_repeats"],
             random_state=CONFIG["random_state"],
-            fixed_scaler=fixed_scaler,
+            fixed_preprocess_pipeline=pp,
         )
 
         # ============== Ergebnisse speichern (EN/RF) ==============

@@ -9,7 +9,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_7030_split"
+DATA_DIR = "results_dummycomparison_timeaware_5050_split"
 
 
 def extract_pid(path):
@@ -363,7 +363,7 @@ def stacked_positive_relmae(
     # 1) Aggregate to median per (feature, pid), clip to positive
     agg = (
         df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
-        .median()
+        .mean()
         .rename(columns={"rel_delta_mae": "rel_pos"})
     )
     agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
@@ -452,8 +452,8 @@ def stacked_positive_relmae(
 # ---------------- MAIN: build shared order, then plot both models ----------------
 outputs = []
 
-df_en = load_model_files_from_last_fold("EN")
-df_rf = load_model_files_from_last_fold("RF")
+df_en = load_model_files("EN")
+df_rf = load_model_files("RF")
 
 # Save combined data
 for model, df in [("EN", df_en), ("RF", df_rf)]:

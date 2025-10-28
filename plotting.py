@@ -10,6 +10,7 @@ plt.ioff()  # interaktiven Modus deaktivieren
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import shap
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -961,3 +962,118 @@ def plot_folds_on_timeseries(
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
+
+
+def plot_elasticnet_vs_dummyregressor(per_fold_df, boot_results, out_path):
+    # --- Assuming per_fold_df and boot_results from previous code exist ---
+
+    # 1️⃣ Basic layout setup
+    sns.set_style("whitegrid")
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    (ax1, ax2), (ax3, ax4) = axes
+    fig.suptitle(
+        "Elastic Net vs DummyRegressor — Fold-wise Performance",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    # 2️⃣ R² per fold (EN vs Dummy)
+    ax1.plot(
+        per_fold_df["fold"],
+        per_fold_df["r2_en"],
+        marker="o",
+        label="Elastic Net",
+        color="#0072B2",
+    )
+    ax1.plot(
+        per_fold_df["fold"],
+        per_fold_df["r2_dummy"],
+        marker="s",
+        label="Dummy",
+        color="#E69F00",
+    )
+    ax1.axhline(0, color="gray", lw=1, linestyle="--")
+    ax1.set_title("R² per Fold")
+    ax1.set_xlabel("Fold")
+    ax1.set_ylabel("R²")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 3️⃣ MAE per fold (EN vs Dummy)
+    ax2.plot(
+        per_fold_df["fold"],
+        per_fold_df["mae_en"],
+        marker="o",
+        label="Elastic Net",
+        color="#0072B2",
+    )
+    ax2.plot(
+        per_fold_df["fold"],
+        per_fold_df["mae_dummy"],
+        marker="s",
+        label="Dummy",
+        color="#E69F00",
+    )
+    ax2.set_title("MAE per Fold")
+    ax2.set_xlabel("Fold")
+    ax2.set_ylabel("Mean Absolute Error")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # 4️⃣ ΔR² bar chart (improvement)
+    sns.barplot(
+        x="fold",
+        y="delta_r2",
+        data=per_fold_df,
+        color="#009E73",
+        ax=ax3,
+    )
+    ax3.axhline(0, color="gray", lw=1)
+    ax3.set_title("ΔR² = R²(EN) - R²(Dummy)")
+    ax3.set_xlabel("Fold")
+    ax3.set_ylabel("R² Improvement")
+
+    # Add bootstrap summary
+    r2_res = boot_results["R2"]
+    ax3.text(
+        0.5,
+        max(per_fold_df["delta_r2"]) * 0.9,
+        f"Mean ΔR² = {r2_res['mean_diff']:.3f}\n"
+        f"95% CI = [{r2_res['ci_low']:.3f}, {r2_res['ci_high']:.3f}]\n"
+        f"p = {r2_res['p_value']:.4f}",
+        ha="center",
+        va="top",
+        fontsize=10,
+        transform=ax3.transAxes,
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
+    )
+
+    # 5️⃣ ΔMAE bar chart (improvement)
+    sns.barplot(
+        x="fold",
+        y="delta_mae",
+        data=per_fold_df,
+        color="#56B4E9",
+        ax=ax4,
+    )
+    ax4.axhline(0, color="gray", lw=1)
+    ax4.set_title("ΔMAE = MAE(Dummy) - MAE(EN)")
+    ax4.set_xlabel("Fold")
+    ax4.set_ylabel("MAE Improvement (positive = better)")
+
+    mae_res = boot_results["MAE"]
+    ax4.text(
+        0.5,
+        max(per_fold_df["delta_mae"]) * 0.9,
+        f"Mean ΔMAE = {mae_res['mean_diff']:.3f}\n"
+        f"95% CI = [{mae_res['ci_low']:.3f}, {mae_res['ci_high']:.3f}]\n"
+        f"p = {mae_res['p_value']:.4f}",
+        ha="center",
+        va="top",
+        fontsize=10,
+        transform=ax4.transAxes,
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(out_path, dpi=300)

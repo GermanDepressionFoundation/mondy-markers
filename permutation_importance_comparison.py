@@ -9,7 +9,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_with_nightfeatures_perfeaturescaler_timeaware_debug2"
+DATA_DIR = "results_dummycomparison_timeaware_5050_split"
 
 
 def extract_pid(path):
@@ -363,7 +363,7 @@ def stacked_positive_relmae(
     # 1) Aggregate to median per (feature, pid), clip to positive
     agg = (
         df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
-        .median()
+        .mean()
         .rename(columns={"rel_delta_mae": "rel_pos"})
     )
     agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
@@ -452,8 +452,8 @@ def stacked_positive_relmae(
 # ---------------- MAIN: build shared order, then plot both models ----------------
 outputs = []
 
-df_en = load_model_files_from_last_fold("EN")
-df_rf = load_model_files_from_last_fold("RF")
+df_en = load_model_files("EN")
+df_rf = load_model_files("RF")
 
 # Save combined data
 for model, df in [("EN", df_en), ("RF", df_rf)]:
@@ -497,29 +497,43 @@ print(outputs)
 
 def load_fold_metrics(pid, model_tag, data_dir=DATA_DIR):
     """
-    Load <pid>_<model>_fold_metrics.csv and return a dict {fold_label(str): r2(float)}.
-    If the file is missing or malformed, return {}.
+    Load <pid>_<model>_fold_metrics.csv and return:
+      { str(fold): {"r2": float|None, "n_test_samples": int|None} }
     """
     path = os.path.join(data_dir, f"{pid}_{model_tag}_fold_metrics.csv")
     if not os.path.exists(path):
         return {}
+
     try:
         df = pd.read_csv(path)
     except Exception as e:
         print(f"Skipping fold metrics for {pid} {model_tag}: {e}")
         return {}
 
-    # robust column handling
-    fold_col = "fold" if "fold" in df.columns else None
-    r2_col = "r2" if "r2" in df.columns else None
-    if fold_col is None or r2_col is None:
+    if "fold" not in df.columns or "r2" not in df.columns:
         print(f"Fold metrics missing required columns in {path}: {list(df.columns)}")
         return {}
 
-    # coerce fold labels to string for consistent matching
-    fold_labels = df[fold_col].astype(str).tolist()
-    r2_vals = pd.to_numeric(df[r2_col], errors="coerce").tolist()
-    return {f: (v if np.isfinite(v) else None) for f, v in zip(fold_labels, r2_vals)}
+    df["fold"] = df["fold"].astype(str)
+    df["r2"] = pd.to_numeric(df["r2"], errors="coerce")
+
+    # robust detection of n_test_samples
+    n_col = None
+    for cand in ["n_test_samples", "n_test", "n_test_days"]:
+        if cand in df.columns:
+            n_col = cand
+            df[n_col] = pd.to_numeric(df[n_col], errors="coerce")
+            break
+
+    out = {}
+    for _, row in df.iterrows():
+        out[row["fold"]] = {
+            "r2": float(row["r2"]) if pd.notna(row["r2"]) else None,
+            "n_test_samples": (
+                int(row[n_col]) if n_col and pd.notna(row[n_col]) else None
+            ),
+        }
+    return out
 
 
 def load_per_fold_file(model_tag, data_dir=DATA_DIR):
@@ -762,9 +776,9 @@ def per_participant_stacked_positive(
     totals_fold = piv.sum(axis=0)
 
     # --- NEW: load fold-level R² and align to fold_order
-    r2_map = load_fold_metrics(pid, model_tag, DATA_DIR)
+    metrics_map = load_fold_metrics(pid, model_tag, DATA_DIR)
     # keys as strings for robust matching
-    r2_per_fold = [r2_map.get(str(f), None) for f in fold_order]
+    r2_per_fold = [metrics_map.get(str(f), None) for f in fold_order]
 
     x = np.arange(len(fold_order))
     features = piv.index.tolist()
@@ -794,25 +808,32 @@ def per_participant_stacked_positive(
         )
         bottoms += heights
 
-    # label totals and R² on top
     if label_totals:
         ymax = totals_fold.max() if len(totals_fold) else 0.0
-        offset = 0.02 * ymax if ymax > 0 else 0.02  # small vertical gap
-        for xi, (fold_label, total, r2_val) in enumerate(
-            zip(fold_order, totals_fold.values, r2_per_fold)
-        ):
-            if total > 0 or (r2_val is not None):
-                if r2_val is not None:
-                    text = f"{total:.2f}\nR²={r2_val:.2f}"
-                else:
-                    text = f"{total:.2f}"
+        offset = 0.02 * ymax if ymax > 0 else 0.02
+        for xi, f in enumerate(fold_order):
+            total = totals_fold.loc[f]
+            m = metrics_map.get(str(f), {})
+            r2_val = m.get("r2")
+            n_test = m.get("n_test_samples")
+
+            # Build multi-line label
+            lines = [f"{total:.2f}"]  # total positive rel_delta_MAE (bar height)
+            if r2_val is not None:
+                lines.append(f"R²={r2_val:.2f}")
+            if n_test is not None:
+                lines.append(f"n={int(n_test)}")
+
+            label = "\n".join(lines)
+            if label:
                 ax.text(
                     xi,
                     total + offset,
-                    text,
+                    label,
                     ha="center",
                     va="bottom",
                     fontsize=9,
+                    linespacing=1.1,
                 )
 
     ax.set_xticks(x)
@@ -823,6 +844,10 @@ def per_participant_stacked_positive(
         f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
     )
     ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+    # Add top margin for annotations (extra headroom)
+    ymax = totals_fold.max() if len(totals_fold) else 0.0
+    if np.isfinite(ymax) and ymax > 0:
+        ax.set_ylim(0, ymax * 1.25)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=200, bbox_inches="tight")

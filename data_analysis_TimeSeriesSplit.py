@@ -968,12 +968,20 @@ def test_elasticnet_outperforms_dummy_regressor(X, y, pseudonym):
     X_preprocessed = preprocess_pipeline().fit_transform(X)
     rtscv = RepeatedTimeSeriesSplit(
         n_splits=10,
-        n_repeats=5,  # e.g., 5 different “variations” of 10 folds
-        max_offset_frac=0.2,  # up to 20% random start offset
-        gap=0,  # embargo if you want it
-        random_state=RANDOM_STATE,  # reproducible
-        offset_strategy="uniform",  # or "linspace" for deterministic spread
+        n_repeats=5,
+        max_offset_frac=0.2,
+        gap=0,
+        random_state=RANDOM_STATE,
+        offset_strategy="uniform",   # oder "linspace"
+        test_size=30,                # NEU: fixe Testfenstergröße (optional)
+        min_train_size=60,           # NEU: sinnvolle Untergrenze (z.B. 2 Monate)
+        min_test_size=14,            # NEU: mind. 2 Wochen
+        warn=True,
+        return_metadata=False,       # auf True setzen, wenn du die Meta brauchst
     )
+    print(f"[RepeatedTSS] nominal={rtscv.get_n_splits()} "
+        f"actual={rtscv.actual_n_splits(len(X_preprocessed))}")
+
 
     en = ElasticNet(
         max_iter=CONFIG["en"]["max_iter"],

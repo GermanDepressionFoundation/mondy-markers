@@ -24,6 +24,17 @@ def extract_pid(path):
     return m.group(1) if m else os.path.splitext(base)[0]
 
 
+def std_to_width(std_vals, s_lo, s_hi, w_min=0.35, w_max=0.90):
+    """
+    Map std to width: higher std -> narrower segment.
+    std_vals: array-like of shape (n_folds,)
+    """
+    s = (std_vals - s_lo) / (s_hi - s_lo)
+    s = np.clip(s, 0.0, 1.0)
+    # invert so higher std -> smaller width
+    return w_min + s * (w_max - w_min)
+
+
 def load_model_files(model_tag, data_dir=DATA_DIR):
     pattern = os.path.join(data_dir, f"*_{model_tag}_perm_group_summary.csv")
     files = sorted(glob.glob(pattern))
@@ -41,31 +52,19 @@ def load_model_files(model_tag, data_dir=DATA_DIR):
             if "group" in df.columns
             else ("feature" if "feature" in df.columns else None)
         )
-        rel_mae_col = None
-        for cand in [
-            "rel_delta_maE",
-            "rel_delta_MAE",
-            "rel_delta_mae",
-            "rel_delta_Mae",
-        ]:
-            if cand in df.columns:
-                rel_mae_col = cand
-                break
-
-        if feature_col is None or rel_mae_col is None:
-            print(
-                f"Skipping {fp}: required columns not found. Found columns: {list(df.columns)}"
-            )
-            continue
+        rel_mae_col = "rel_delta_MAE"
+        delta_mae_std_col = "delta_MAE_std"
 
         pid = extract_pid(fp)
-        tmp = df[[feature_col, rel_mae_col]].copy()
-        tmp.columns = ["feature", "rel_delta_mae"]
+        tmp = df[[feature_col, rel_mae_col, delta_mae_std_col]].copy()
+        tmp.columns = ["feature", "rel_delta_mae", "delta_mae_std"]
         tmp["pid"] = pid
         records.append(tmp)
 
     if not records:
-        return pd.DataFrame(columns=["feature", "rel_delta_mae", "pid"])
+        return pd.DataFrame(
+            columns=["feature", "rel_delta_mae", "delta_mae_std", "pid"]
+        )
     return pd.concat(records, ignore_index=True)
 
 
@@ -337,6 +336,8 @@ OKABE_ITO = [
     "#000000",
 ]
 
+HATCH_PATTERNS = ["/", "\\", "x", "o", "-", "+", ".", "*"]
+
 
 def stacked_positive_relmae(
     df_tidy,
@@ -344,7 +345,6 @@ def stacked_positive_relmae(
     out_png,
     feature_order=None,  # pass shared order to align EN/RF
     top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
-    highlight_top_n=3,  # visually emphasize top-N features overall
     label_totals=True,  # print total per bar on top
     sort_participants_by_total=True,  # sort participants by total height
 ):
@@ -354,7 +354,6 @@ def stacked_positive_relmae(
     - Clips negatives to zero
     - No normalization (keeps absolute comparability)
     - Labels total per participant
-    - Highlights globally top-N features with hatch + edgecolor
     """
     if df_tidy.empty:
         print(f"No data for {model_tag}; skipping stacked bar.")
@@ -392,9 +391,133 @@ def stacked_positive_relmae(
         pivot = pivot.loc[:, totals_pid.sort_values(ascending=False).index]
         totals_pid = pivot.sum(axis=0)
 
-    # 6) Determine globally top-N features to highlight
-    global_feat_totals = pivot.sum(axis=1).sort_values(ascending=False)
-    highlighted = set(global_feat_totals.head(max(0, int(highlight_top_n))).index)
+    # 7) Plot
+    pids = pivot.columns.tolist()
+    features = pivot.index.tolist()
+    x = np.arange(len(pids))
+
+    fig, ax = plt.subplots(
+        figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
+    )
+
+    bottoms = np.zeros(len(pids))
+    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
+    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
+        : len(features)
+    ]
+
+    bars_by_feat = {}
+    for i, feat in enumerate(features):
+        heights = pivot.loc[feat].values
+        bars = ax.bar(
+            x,
+            heights,
+            bottom=bottoms,
+            label=feat,
+            color=colors[i],
+            edgecolor="black",
+            hatch=hatches[i],
+        )
+        bars_by_feat[feat] = bars
+        bottoms += heights
+
+    # 8) Label totals on top (if any non-zero)
+    if label_totals:
+        for xi, total in zip(x, totals_pid.values):
+            if total > 0:
+                ax.text(xi, total, f"{total:.2f}", ha="center", va="bottom", fontsize=9)
+
+    # Axes and labels
+    ax.set_xticks(x)
+    ax.set_xticklabels(pids, rotation=45, ha="right")
+    ax.set_xlabel("Participant (pid)")
+    ax.set_ylabel("Relative feature importance (sum of positives)")
+    ax.set_title(
+        f"{model_tag}: Stacked positive relative feature importance per participant"
+    )
+
+    # Legend outside for readability
+    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_png}")
+
+
+def stacked_positive_relmae_with_std(
+    df_tidy,
+    model_tag,
+    out_png,
+    feature_order=None,  # pass shared order to align EN/RF
+    top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
+    label_totals=True,  # print total per bar on top
+    sort_participants_by_total=True,  # sort participants by total height
+):
+    """
+    Stacked bar plot per participant with only positive relative MAE contributions.
+    - Aggregates median rel_delta_mae per (feature, pid)
+    - Clips negatives to zero
+    - No normalization (keeps absolute comparability)
+    - Labels total per participant
+    """
+    if df_tidy.empty:
+        print(f"No data for {model_tag}; skipping stacked bar.")
+        return
+
+    # 1) Aggregate to median per (feature, pid), clip to positive
+    agg = (
+        df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
+        .mean()
+        .rename(columns={"rel_delta_mae": "rel_pos"})
+    )
+    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
+
+    # 2) Pivot to features x participants (sum in case multiple rows remain)
+    pivot = agg.pivot_table(
+        index="feature", columns="pid", values="rel_pos", aggfunc="sum"
+    ).fillna(0.0)
+
+    # --- NEW: std per (feature, fold) and pivot to align with `piv`
+    std_agg = (
+        df_tidy.groupby(["feature", "pid"], as_index=False)["delta_mae_std"]
+        .median()  # or .mean(), whichever matches your intent
+        .rename(columns={"delta_mae_std": "std_val"})
+    )
+
+    std_piv = std_agg.pivot_table(
+        index="feature", columns="pid", values="std_val", aggfunc="mean"
+    ).fillna(0.0)
+
+    # Robust global normalization for std -> width mapping
+    std_all = std_piv.values.ravel()
+    std_all = std_all[np.isfinite(std_all)]
+    if len(std_all) == 0:
+        s_lo, s_hi = 0.0, 1.0
+    else:
+        # 5–95% robust range to avoid outliers dominating
+        s_lo, s_hi = np.percentile(std_all, [5, 95])
+        if s_hi <= s_lo:
+            s_hi = s_lo + 1e-12  # avoid divide by zero
+
+    # 3) Optional: reduce to top-K features (by total positive contribution)
+    if top_k is not None and top_k < pivot.shape[0]:
+        totals_feat = pivot.sum(axis=1)
+        keep = totals_feat.sort_values(ascending=False).head(top_k).index
+        pivot = pivot.loc[keep]
+
+    # 4) Enforce feature order if provided; else order by total contribution
+    if feature_order is not None:
+        available = [f for f in feature_order if f in pivot.index]
+        pivot = pivot.reindex(available)
+    else:
+        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+
+    # 5) Optionally sort participants by total bar height (descending)
+    totals_pid = pivot.sum(axis=0)
+    if sort_participants_by_total:
+        pivot = pivot.loc[:, totals_pid.sort_values(ascending=False).index]
+        totals_pid = pivot.sum(axis=0)
 
     # 7) Plot
     pids = pivot.columns.tolist()
@@ -407,20 +530,25 @@ def stacked_positive_relmae(
 
     bottoms = np.zeros(len(pids))
     colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
+    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
+        : len(features)
+    ]
 
     bars_by_feat = {}
     for i, feat in enumerate(features):
         heights = pivot.loc[feat].values
-        is_highlight = feat in highlighted
+        std_vals = std_piv.loc[feat].values
+        std_vals = np.where(heights > 0, std_vals, 0.0)
+        widths = std_to_width(std_vals, s_lo, s_hi)
         bars = ax.bar(
             x,
             heights,
+            width=widths,
             bottom=bottoms,
             label=feat,
             color=colors[i],
-            edgecolor="black" if is_highlight else None,
-            linewidth=1.2 if is_highlight else 0.0,
-            hatch="///" if is_highlight else None,
+            edgecolor="black",
+            hatch=hatches[i],
         )
         bars_by_feat[feat] = bars
         bottoms += heights
@@ -484,7 +612,18 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         out_png=out,
         feature_order=shared_order,
         top_k=12,
-        highlight_top_n=3,  # hatch the 3 most important features globally
+        label_totals=True,
+        sort_participants_by_total=False,
+    )
+    outputs.append(out)
+
+    out = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_stacked_barplot_std.png")
+    stacked_positive_relmae_with_std(
+        df_tidy=df,
+        model_tag=model,
+        out_png=out,
+        feature_order=shared_order,
+        top_k=12,
         label_totals=True,
         sort_participants_by_total=False,
     )
@@ -559,26 +698,12 @@ def load_per_fold_file(model_tag, data_dir=DATA_DIR):
             else ("feature" if "feature" in df.columns else None)
         )
         fold_col = "fold" if "fold" in df.columns else None
-        rel_mae_col = None
-        for cand in [
-            "rel_delta_MAE",
-            "rel_delta_maE",
-            "rel_delta_mae",
-            "rel_delta_Mae",
-        ]:
-            if cand in df.columns:
-                rel_mae_col = cand
-                break
-
-        if feature_col is None or rel_mae_col is None or fold_col is None:
-            print(
-                f"Skipping {fp}: required columns not found. Columns: {list(df.columns)}"
-            )
-            continue
+        rel_delta_mae_col = "rel_delta_MAE"
+        delta_mae_std_col = "delta_MAE_std"
 
         pid = extract_pid(fp)
-        tmp = df[[feature_col, fold_col, rel_mae_col]].copy()
-        tmp.columns = ["feature", "fold", "rel_delta_mae"]
+        tmp = df[[feature_col, fold_col, rel_delta_mae_col, delta_mae_std_col]].copy()
+        tmp.columns = ["feature", "fold", "rel_delta_mae", "delta_mae_std"]
         # Ensure fold is sortable: try numeric, else leave as string
         try:
             tmp["fold_num"] = pd.to_numeric(tmp["fold"], errors="coerce")
@@ -733,7 +858,7 @@ def per_participant_heatmap_categorical(df_pid, pid, model_tag, out_png):
 
 
 def per_participant_stacked_positive(
-    df_pid, pid, model_tag, out_png, top_k=None, highlight_top_n=3, label_totals=True
+    df_pid, pid, model_tag, out_png, top_k=None, label_totals=True
 ):
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
@@ -788,23 +913,20 @@ def per_participant_stacked_positive(
 
     bottoms = np.zeros(len(fold_order))
     colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
-
-    # highlight top-N features overall
-    global_feat_totals = piv.sum(axis=1).sort_values(ascending=False)
-    highlighted = set(global_feat_totals.head(max(0, int(highlight_top_n))).index)
+    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
+        : len(features)
+    ]
 
     for i, feat in enumerate(features):
         heights = piv.loc[feat].values
-        is_highlight = feat in highlighted
         ax.bar(
             x,
             heights,
             bottom=bottoms,
             label=feat,
             color=colors[i],
-            edgecolor="black" if is_highlight else None,
-            linewidth=1.2 if is_highlight else 0.0,
-            hatch="///" if is_highlight else None,
+            edgecolor="black",
+            hatch=hatches[i],
         )
         bottoms += heights
 
@@ -818,7 +940,155 @@ def per_participant_stacked_positive(
             n_test = m.get("n_test_samples")
 
             # Build multi-line label
-            lines = [f"{total:.2f}"]  # total positive rel_delta_MAE (bar height)
+            lines = []
+            if r2_val is not None:
+                lines.append(f"R²={r2_val:.2f}")
+            if n_test is not None:
+                lines.append(f"n={int(n_test)}")
+
+            label = "\n".join(lines)
+            if label:
+                ax.text(
+                    xi,
+                    total + offset,
+                    label,
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    linespacing=1.1,
+                )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(fold_order, rotation=45, ha="right")
+    ax.set_xlabel("Fold")
+    ax.set_ylabel("Relative feature importance (sum of positives)")
+    ax.set_title(
+        f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
+    )
+    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+    # Add top margin for annotations (extra headroom)
+    ymax = totals_fold.max() if len(totals_fold) else 0.0
+    if np.isfinite(ymax) and ymax > 0:
+        ax.set_ylim(0, ymax * 1.25)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_png}")
+
+
+def per_participant_stacked_positive_with_std(
+    df_pid, pid, model_tag, out_png, top_k=None, label_totals=True
+):
+    """
+    Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
+    Absolute scale (no normalization). Totals labeled.
+    Now also annotates each bar with the fold R² from <pid>_<model>_fold_metrics.csv.
+    """
+    if df_pid.empty:
+        return
+
+    # median per (feature, fold), clip negatives
+    agg = (
+        df_pid.groupby(["feature", "fold"], as_index=False)["rel_delta_mae"]
+        .median()
+        .rename(columns={"rel_delta_mae": "rel_pos"})
+    )
+    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
+
+    # pivot: features x folds
+    piv = agg.pivot_table(
+        index="feature", columns="fold", values="rel_pos", aggfunc="sum"
+    ).fillna(0.0)
+
+    # --- NEW: std per (feature, fold) and pivot to align with `piv`
+    std_agg = (
+        df_pid.groupby(["feature", "fold"], as_index=False)["delta_mae_std"]
+        .median()  # or .mean(), whichever matches your intent
+        .rename(columns={"delta_mae_std": "std_val"})
+    )
+
+    std_piv = std_agg.pivot_table(
+        index="feature", columns="fold", values="std_val", aggfunc="mean"
+    ).fillna(0.0)
+
+    # Robust global normalization for std -> width mapping
+    std_all = std_piv.values.ravel()
+    std_all = std_all[np.isfinite(std_all)]
+    if len(std_all) == 0:
+        s_lo, s_hi = 0.0, 1.0
+    else:
+        # 5–95% robust range to avoid outliers dominating
+        s_lo, s_hi = np.percentile(std_all, [5, 95])
+        if s_hi <= s_lo:
+            s_hi = s_lo + 1e-12  # avoid divide by zero
+
+    # top-k features (by total positive)
+    if top_k is not None and top_k < piv.shape[0]:
+        totals_feat = piv.sum(axis=1)
+        keep = totals_feat.sort_values(ascending=False).head(top_k).index
+        piv = piv.loc[keep]
+
+    # feature order by total positive
+    piv = piv.loc[piv.sum(axis=1).sort_values(ascending=False).index]
+
+    # totals per fold
+    totals_fold = piv.sum(axis=0)
+
+    # order folds (use your helper) and ensure all exist
+    fold_order = _order_folds(df_pid)
+    for f in fold_order:
+        if f not in piv.columns:
+            piv[f] = 0.0
+    piv = piv[fold_order]
+
+    # --- NEW: load fold-level R² and align to fold_order
+    metrics_map = load_fold_metrics(pid, model_tag, DATA_DIR)
+    # keys as strings for robust matching
+    r2_per_fold = [metrics_map.get(str(f), None) for f in fold_order]
+
+    x = np.arange(len(fold_order))
+    features = piv.index.tolist()
+    fig, ax = plt.subplots(
+        figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * len(features)))
+    )
+
+    bottoms = np.zeros(len(fold_order))
+    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
+    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
+        : len(features)
+    ]
+
+    for i, feat in enumerate(features):
+        heights = piv.loc[feat].values
+        # zero-out errors where there is no bar height to avoid floating whiskers
+        std_vals = std_piv.loc[feat].values
+        std_vals = np.where(heights > 0, std_vals, 0.0)
+        widths = std_to_width(std_vals, s_lo, s_hi)
+
+        ax.bar(
+            x,
+            heights,
+            bottom=bottoms,
+            width=widths,
+            label=feat,
+            color=colors[i],
+            edgecolor="black",
+            hatch=hatches[i],
+        )
+        bottoms += heights
+
+    if label_totals:
+        ymax = totals_fold.max() if len(totals_fold) else 0.0
+        offset = 0.02 * ymax if ymax > 0 else 0.02
+        for xi, f in enumerate(fold_order):
+            total = totals_fold.loc[f]
+            m = metrics_map.get(str(f), {})
+            r2_val = m.get("r2")
+            n_test = m.get("n_test_samples")
+
+            # Build multi-line label
+            lines = []
             if r2_val is not None:
                 lines.append(f"R²={r2_val:.2f}")
             if n_test is not None:
@@ -878,5 +1148,13 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive.png"
         )
         per_participant_stacked_positive(
-            df_pid, pid, model_tag, out3, top_k=12, highlight_top_n=3, label_totals=True
+            df_pid, pid, model_tag, out3, top_k=12, label_totals=True
+        )
+
+        # Stacked positive bar per fold with std-based widths
+        out4 = os.path.join(
+            per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive_std_widths.png"
+        )
+        per_participant_stacked_positive_with_std(
+            df_pid, pid, model_tag, out4, top_k=12, label_totals=True
         )

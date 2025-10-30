@@ -1,8 +1,10 @@
 # RepeatedTimeSeriesSplit.py  (drop-in replacement)
 
 import warnings
+
 import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
+
 
 class RepeatedTimeSeriesSplit:
     """
@@ -78,8 +80,18 @@ class RepeatedTimeSeriesSplit:
 
     # ---- informational helpers -------------------------------------------------
     def get_n_splits(self, X=None, y=None, groups=None):
-        # Nominal upper bound; actual may be lower once offsets/gap/min sizes apply.
-        return self.n_splits * self.n_repeats
+        """
+        Return the actual number of splits for the given X.
+        This must match the number of splits yielded by `split(X, ...)`.
+        """
+        if X is None:
+            raise ValueError(
+                "X must be provided to compute the actual number of splits."
+            )
+        n_samples = len(X)
+        # Use a deterministic, per-(seed, n_samples) RNG so this matches `split`.
+        rng = np.random.default_rng((self.random_state, n_samples))
+        return sum(1 for _ in self._generate(n_samples, dry_run=True, rng=rng))
 
     def actual_n_splits(self, n_samples: int) -> int:
         count = 0
@@ -88,14 +100,14 @@ class RepeatedTimeSeriesSplit:
         return count
 
     # ---- internal offset iterator ---------------------------------------------
-    def _iter_offsets(self, n_samples: int):
+    def _iter_offsets(self, n_samples: int, rng: np.random.Generator):
         max_offset = int(np.floor(self.max_offset_frac * n_samples))
         if max_offset <= 0:
             return np.zeros(self.n_repeats, dtype=int)
 
         if self.offset_strategy == "linspace":
             offs = np.linspace(0, max_offset, num=self.n_repeats, dtype=int)
-            offs = np.unique(offs)  # deduplicate after int-cast
+            offs = np.unique(offs)
             if self.warn and len(offs) < self.n_repeats:
                 warnings.warn(
                     f"[RepeatedTSS] linspace produced only {len(offs)} unique offsets "
@@ -103,27 +115,35 @@ class RepeatedTimeSeriesSplit:
                 )
             return offs
 
-        # "uniform": sample without replacement if possible, else with replacement
+        # "uniform"
         if max_offset + 1 >= self.n_repeats:
-            offs = self._rng.choice(max_offset + 1, size=self.n_repeats, replace=False)
+            offs = rng.choice(max_offset + 1, size=self.n_repeats, replace=False)
         else:
-            offs = self._rng.integers(0, max_offset + 1, size=self.n_repeats)
+            offs = rng.integers(0, max_offset + 1, size=self.n_repeats)
             if self.warn:
                 warnings.warn(
-                    f"[RepeatedTSS] max_offset={max_offset} yields < n_repeats unique values; "
-                    f"duplicates likely."
+                    f"[RepeatedTSS] max_offset={max_offset} yields < n_repeats unique values; duplicates likely."
                 )
         return np.asarray(offs, dtype=int)
 
     # ---- fold generator core ---------------------------------------------------
-    def _generate(self, n_samples: int, dry_run: bool = False):
+    def _generate(
+        self,
+        n_samples: int,
+        dry_run: bool = False,
+        rng: np.random.Generator | None = None,
+    ):
         if n_samples <= self.n_splits:
             raise ValueError(
                 f"Not enough samples ({n_samples}) for n_splits={self.n_splits}."
             )
 
+        # Use a deterministic RNG tied to (seed, n_samples) unless provided.
+        if rng is None:
+            rng = np.random.default_rng((self.random_state, n_samples))
+
         seen = set()
-        offsets = self._iter_offsets(n_samples)
+        offsets = self._iter_offsets(n_samples, rng=rng)
         self._last_offsets_ = offsets
 
         for rep_idx, offset in enumerate(offsets, start=1):
@@ -156,7 +176,10 @@ class RepeatedTimeSeriesSplit:
                     tr_abs = tr_abs[tr_abs < cutoff]
 
                 # Size guards
-                if len(tr_abs) < self.min_train_size or len(te_abs) < self.min_test_size:
+                if (
+                    len(tr_abs) < self.min_train_size
+                    or len(te_abs) < self.min_test_size
+                ):
                     if self.warn:
                         warnings.warn(
                             f"[RepeatedTSS][rep={rep_idx}, split={split_idx}, offset={offset}] "
@@ -194,4 +217,5 @@ class RepeatedTimeSeriesSplit:
     # ---- public API ------------------------------------------------------------
     def split(self, X, y=None, groups=None):
         n_samples = len(X)
+        # _generate will create the deterministic RNG tied to (seed, n_samples)
         yield from self._generate(n_samples, dry_run=False)

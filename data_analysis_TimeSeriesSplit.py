@@ -50,7 +50,7 @@ CONFIG = {
         "tol": 1e-3,
         "y_min_var_init": 1e-3,  # min. Varianz im Startfenster (sonst erweitern)
         "param_grid": {
-            "model__alpha": list(np.logspace(-6, 1, 80)),
+            "model__alpha": list(np.logspace(-5, 0, 60)),
             "model__l1_ratio": [0.1, 0.5, 0.9],
         },
     },
@@ -68,9 +68,16 @@ CONFIG = {
         "test_size": 30,
         "train_size": 30,
         "embargo": 0,
-        "n_repeats": 10,  # 10 nunr für smoke test (sonst 50)
+        "n_repeats": 50,  # 10 nunr für smoke test (sonst 50)
         "agg": "mean",  # "mean" oder "median"
         "block_len": 7,  # Länge der Blöcke für blockweise Permutation
+    },
+    "rtscv": {
+        "n_splits": 10,
+        "n_repeats": 5,
+        "test_size": 30,
+        "min_train_size": 60,
+        "min_test_size": 14,
     },
 }
 
@@ -697,9 +704,16 @@ def run_explain_over_splits(
     pi_groups_summary_df = (
         (
             pi_groups_folds_df.groupby("group")[
-                ["rel_delta_MAE", "rel_delta_R2", "delta_R2", "delta_MAE"]
+                [
+                    "rel_delta_MAE",
+                    "rel_delta_R2",
+                    "delta_R2",
+                    "delta_MAE",
+                    "delta_R2_std",
+                    "delta_MAE_std",
+                ]
             ]
-            .median()
+            .mean()
             .sort_values("rel_delta_MAE", ascending=False)
             .reset_index()
         )
@@ -964,24 +978,34 @@ def compare_model_to_dummy_with_bootstrap(
     }
 
 
-def test_elasticnet_outperforms_dummy_regressor(X, y, pseudonym):
+def test_elasticnet_outperforms_dummy_regressor(
+    X,
+    y,
+    pseudonym,
+    n_splits=5,
+    n_repeats=10,
+    test_size=30,
+    min_train_size=60,
+    min_test_size=14,
+):
     X_preprocessed = preprocess_pipeline().fit_transform(X)
     rtscv = RepeatedTimeSeriesSplit(
-        n_splits=10,
-        n_repeats=5,
+        n_splits=n_splits,
+        n_repeats=n_repeats,
         max_offset_frac=0.2,
         gap=0,
         random_state=RANDOM_STATE,
-        offset_strategy="uniform",   # oder "linspace"
-        test_size=30,                # NEU: fixe Testfenstergröße (optional)
-        min_train_size=60,           # NEU: sinnvolle Untergrenze (z.B. 2 Monate)
-        min_test_size=14,            # NEU: mind. 2 Wochen
+        offset_strategy="uniform",  # oder "linspace"
+        test_size=test_size,  # NEU: fixe Testfenstergröße (optional)
+        min_train_size=min_train_size,  # NEU: sinnvolle Untergrenze (z.B. 2 Monate)
+        min_test_size=min_test_size,  # NEU: mind. 2 Wochen
         warn=True,
-        return_metadata=False,       # auf True setzen, wenn du die Meta brauchst
+        return_metadata=False,  # auf True setzen, wenn du die Meta brauchst
     )
-    print(f"[RepeatedTSS] nominal={rtscv.get_n_splits()} "
-        f"actual={rtscv.actual_n_splits(len(X_preprocessed))}")
-
+    print(
+        f"[RepeatedTSS] nominal={rtscv.get_n_splits(X=X_preprocessed)} "
+        f"actual={rtscv.actual_n_splits(len(X_preprocessed))}"
+    )
 
     en = ElasticNet(
         max_iter=CONFIG["en"]["max_iter"],
@@ -1105,27 +1129,6 @@ def test_elasticnet_outperforms_dummy_regressor(X, y, pseudonym):
     )
     print(per_fold_df)
 
-    dummy_r2 = []
-    model_r2 = []
-
-    for train_idx, test_idx in rtscv.split(X_preprocessed):
-        X_train, X_test = X_preprocessed.iloc[train_idx], X_preprocessed.iloc[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-
-        # Best EN from CV
-        best_en = ElasticNet(
-            **en_gs.best_params_, max_iter=10000, tol=1e-3, random_state=42
-        )
-        best_en.fit(X_train, y_train)
-        y_pred_en = best_en.predict(X_test)
-        model_r2.append(r2_score(y_test, y_pred_en))
-
-        # Dummy baseline
-        dummy = DummyRegressor(strategy="mean")
-        dummy.fit(X_train, y_train)
-        y_pred_dummy = dummy.predict(X_test)
-        dummy_r2.append(r2_score(y_test, y_pred_dummy))
-
     plot_elasticnet_vs_dummyregressor(
         per_fold_df=per_fold_df,
         boot_results=boot_results,
@@ -1204,19 +1207,32 @@ def process_participants(df_raw, pseudonyms, target_column):
             drop=True
         )
 
+        min_train_size = CONFIG["rtscv"].get("min_train_size", 60)
+        min_test_size = CONFIG["rtscv"].get("min_test_size", 14)
+        fixed_test_size = CONFIG["rtscv"].get("fixed_test_size", 30)
+
+        n = len(y)
+        if n < (min_train_size + max(min_test_size, fixed_test_size)):
+            print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
+            continue
+
         elasticnet_outperforms_dummy_regressor = (
-            test_elasticnet_outperforms_dummy_regressor(X, y, pseudonym)
+            test_elasticnet_outperforms_dummy_regressor(
+                X=X,
+                y=y,
+                pseudonym=pseudonym,
+                n_splits=CONFIG["rtscv"].get("n_splits", 5),
+                n_repeats=CONFIG["rtscv"].get("n_repeats", 10),
+                test_size=fixed_test_size,
+                min_train_size=min_train_size,
+                min_test_size=min_test_size,
+            )
         )
 
         if not elasticnet_outperforms_dummy_regressor:
             print(
                 f"[INFO] {pseudonym}: ElasticNet does not outperform Dummy; skipping."
             )
-            continue
-
-        n = len(y)
-        if n < 30:
-            print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
             continue
 
         # --- time-based initial split by CONFIG["init_frac_for_hp"] ----------

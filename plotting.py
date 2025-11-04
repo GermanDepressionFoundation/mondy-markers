@@ -964,7 +964,7 @@ def plot_folds_on_timeseries(
     plt.close()
 
 
-def plot_elasticnet_vs_dummyregressor(per_fold_df, boot_results, out_path):
+def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path):
     # --- Assuming per_fold_df and boot_results from previous code exist ---
 
     # 1️⃣ Basic layout setup
@@ -972,7 +972,7 @@ def plot_elasticnet_vs_dummyregressor(per_fold_df, boot_results, out_path):
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     (ax1, ax2), (ax3, ax4) = axes
     fig.suptitle(
-        "Elastic Net vs DummyRegressor — Fold-wise Performance",
+        f"{model_type} vs DummyRegressor — Fold-wise Performance",
         fontsize=14,
         fontweight="bold",
     )
@@ -982,7 +982,7 @@ def plot_elasticnet_vs_dummyregressor(per_fold_df, boot_results, out_path):
         per_fold_df["fold"],
         per_fold_df["r2_en"],
         marker="o",
-        label="Elastic Net",
+        label=model_type,
         color="#0072B2",
     )
     ax1.plot(
@@ -1004,7 +1004,7 @@ def plot_elasticnet_vs_dummyregressor(per_fold_df, boot_results, out_path):
         per_fold_df["fold"],
         per_fold_df["mae_en"],
         marker="o",
-        label="Elastic Net",
+        label=model_type,
         color="#0072B2",
     )
     ax2.plot(

@@ -9,7 +9,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_dummycomparison_timeaware_5050_split"
+DATA_DIR = "results_dummycomparison_timeaware_5050_split_newdata"
 
 
 def extract_pid(path):

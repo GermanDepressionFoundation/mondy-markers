@@ -29,8 +29,8 @@ CONFIG = {
     "random_state": 42,
     "top_k": 15,
     "paths": {
-        "data": "data/df_merged_dupsfree_v8.pickle",
-        "results_dir": "results_dummycomparison_timeaware_5050_split",
+        "data": "data/df_merged_with_mnar_v9.pickle",
+        "results_dir": "results_dummycomparison_timeaware_5050_split_newdata",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
@@ -102,16 +102,11 @@ RANDOM_STATE = CONFIG["random_state"]
 PHQ2_COLUMN = CONFIG["targets"]["phq2"]
 PHQ9_COLUMN = CONFIG["targets"]["phq9"]
 
-feature_config = pd.read_csv("config/feature_config.csv")
+feature_config = pd.read_csv("config/feature_config_v9.csv")
 LOG1P_COLS = feature_config[feature_config["scaler"] == "log1p"]["feature"].tolist()
 ZSCORE_COLS = feature_config[feature_config["scaler"] == "zscore"]["feature"].tolist()
 MINMAX_COLS = feature_config[feature_config["scaler"] == "minmax"]["feature"].tolist()
-BASELINE_FEATURES = feature_config[feature_config["baseline"] == 1]["feature"].tolist()
-DAY_FEATURES = feature_config[feature_config["day"] == 1]["feature"].tolist()
-NIGHT_FEATURES = feature_config[feature_config["night"] == 1]["feature"].tolist()
-ACR_FEATURES = feature_config[feature_config["acr"] == 1]["feature"].tolist()
-
-FEATURES_TO_CONSIDER = BASELINE_FEATURES + DAY_FEATURES + NIGHT_FEATURES + ACR_FEATURES
+FEATURES_TO_CONSIDER = feature_config["feature"].tolist()
 
 
 # Groups für gruppenweise Permutation Importance (auf Quellenebene über "category")
@@ -119,34 +114,10 @@ def _feats(cats):
     return feature_config[feature_config["category"].isin(cats)]["feature"].tolist()
 
 
-# Gruppen (ohne Day/Night)
-COARSE_GROUPS = {
-    "HRV": _feats(["HRV"]),
-    "ACR": _feats(["steps", "ACR"]),  # Aktivität/Transitions
-    "COMM": _feats(["app usage", "calls"]),  # Kommunikation / App-Use
-    "AUDIO": _feats(["audio"]),  # Sprach-/Stimm-Proxys
-    "SLEEP": _feats(["sleep"]),
-    "CAL": _feats(["time"]),  # Kalender/Trend
-}
-
-# Day/Night-Variante für Quellen
-DAY_NIGHT_GROUPS = {}
-for name, cats in {
-    "HRV": ["HRV"],
-    "ACR": ["steps", "ACR"],
-    "COMM": ["app usage", "calls"],
-    "SLEEP": ["sleep"],
-}.items():
-    for period in ["day", "night"]:
-        mask = feature_config["category"].isin(cats) & (feature_config[period] == 1)
-        DAY_NIGHT_GROUPS[f"{name}_{period}"] = feature_config.loc[
-            mask, "feature"
-        ].tolist()
-
-# leere Gruppen entfernen
-DAY_NIGHT_GROUPS = {k: v for k, v in DAY_NIGHT_GROUPS.items() if v}
-
-CONFIG["feature_groups"] = COARSE_GROUPS
+COARSE_GROUPS = {}
+unique_groups = feature_config["category"].unique().tolist()
+for ug in unique_groups:
+    COARSE_GROUPS[ug] = _feats([ug])
 
 
 # ============ Feature-spezifische Scaler ======================================
@@ -190,10 +161,10 @@ class Log1pScaler(BaseEstimator, TransformerMixin):
 # %% Plot-Imports (deine vorhandenen Utils) ==========================
 from plotting import (
     evaluate_and_plot_parity,
-    plot_elasticnet_vs_dummyregressor,
     plot_folds_on_timeseries,
     plot_importance_bars,
     plot_mae_rmssd_bar_2,
+    plot_model_vs_dummyregressor,
     plot_phq2_test_errors_from_results,
     plot_phq2_timeseries_from_results,
     plot_phq2_timeseries_with_adherence_from_results,
@@ -227,11 +198,11 @@ def prepare_data(df, target_column):
 
 
 feature_scalers = {}
-for col in list(set(LOG1P_COLS).intersection(set(FEATURES_TO_CONSIDER))):
+for col in list(set(LOG1P_COLS)):
     feature_scalers[col] = Log1pScaler()
-for col in list(set(ZSCORE_COLS).intersection(set(FEATURES_TO_CONSIDER))):
+for col in list(set(ZSCORE_COLS)):
     feature_scalers[col] = StandardScaler()
-for col in list(set(MINMAX_COLS).intersection(set(FEATURES_TO_CONSIDER))):
+for col in list(set(MINMAX_COLS)):
     feature_scalers[col] = MinMaxScaler()
 
 pre_scalers = ColumnTransformer(
@@ -652,22 +623,44 @@ def run_explain_over_splits(
                     y_hat_p = model.predict(Xp)
                     dR2_list.append(R2_base - r2_score(y[te_idx], y_hat_p))
                     dMAE_list.append(mean_absolute_error(y[te_idx], y_hat_p) - MAE_base)
+                # summarize permutation repeats robustly (median) and clip relative metrics at 0
+                dR2_arr = np.asarray(dR2_list, dtype=float)
+                dMAE_arr = np.asarray(dMAE_list, dtype=float)
+
+                delta_R2_med = float(np.nanmedian(dR2_arr))
+                delta_MAE_med = float(np.nanmedian(dMAE_arr))
+
+                # (optional) spread across repeats — useful for QC
+                delta_R2_std = (
+                    float(np.nanstd(dR2_arr, ddof=1)) if dR2_arr.size > 1 else np.nan
+                )
+                delta_MAE_std = (
+                    float(np.nanstd(dMAE_arr, ddof=1)) if dMAE_arr.size > 1 else np.nan
+                )
+
+                # Relative metrics: clip to >= 0. For R² we use |R2_base| in the denominator
+                # so a negative baseline R² doesn’t flip the sign.
+                rel_delta_MAE = (
+                    max(0.0, delta_MAE_med / MAE_base)
+                    if (MAE_base is not None and MAE_base > 0)
+                    else np.nan
+                )
+                rel_delta_R2 = (
+                    max(0.0, delta_R2_med / abs(R2_base))
+                    if (R2_base is not None and R2_base != 0)
+                    else np.nan
+                )
+
                 pi_rows.append(
                     {
                         "fold": fold_id,
                         "feature": str(col).split("__")[-1],
-                        "delta_R2": float(np.mean(dR2_list)),
-                        "delta_MAE": float(np.mean(dMAE_list)),
-                        "rel_delta_R2": (
-                            float(np.mean(dR2_list) / R2_base)
-                            if R2_base != 0
-                            else np.nan
-                        ),
-                        "rel_delta_MAE": (
-                            float(np.mean(dMAE_list) / MAE_base)
-                            if MAE_base != 0
-                            else np.nan
-                        ),
+                        "delta_R2": delta_R2_med,
+                        "delta_MAE": delta_MAE_med,
+                        "rel_delta_R2": rel_delta_R2,
+                        "rel_delta_MAE": rel_delta_MAE,
+                        "delta_R2_std": delta_R2_std,  # optional but handy
+                        "delta_MAE_std": delta_MAE_std,  # optional but handy
                     }
                 )
 
@@ -701,27 +694,46 @@ def run_explain_over_splits(
     )
 
     pi_groups_folds_df = pd.DataFrame(pi_group_rows) if compute_pi else None
-    pi_groups_summary_df = (
-        (
-            pi_groups_folds_df.groupby("group")[
-                [
-                    "rel_delta_MAE",
-                    "rel_delta_R2",
-                    "delta_R2",
-                    "delta_MAE",
-                    "delta_R2_std",
-                    "delta_MAE_std",
-                ]
-            ]
-            .mean()
+    # --- Option B: clip negatives to 0, then aggregate by MEDIAN per group ---
+    if (
+        compute_pi
+        and (pi_groups_folds_df is not None)
+        and (not pi_groups_folds_df.empty)
+    ):
+        df_agg = pi_groups_folds_df.copy()
+
+        # keep only non-negative contributions for the *relative* metrics
+        for col in ["rel_delta_MAE", "rel_delta_R2"]:
+            if col in df_agg.columns:
+                df_agg[col] = pd.to_numeric(df_agg[col], errors="coerce").clip(
+                    lower=0.0
+                )
+
+        # aggregate: median for deltas, (optionally) mean for the per-fold std columns
+        agg_map = {
+            "rel_delta_MAE": "median",
+            "rel_delta_R2": "median",
+            "delta_R2": "median",
+            "delta_MAE": "median",
+        }
+        # keep these if present; they summarize the variability of the permutation runs within each fold
+        if "delta_R2_std" in df_agg.columns:
+            agg_map["delta_R2_std"] = "mean"
+        if "delta_MAE_std" in df_agg.columns:
+            agg_map["delta_MAE_std"] = "mean"
+
+        # (optional) share of folds with strictly positive contribution — useful for stability
+        df_agg["has_pos_rel_mae"] = (df_agg.get("rel_delta_MAE", 0.0) > 0).astype(float)
+
+        pi_groups_summary_df = (
+            df_agg.groupby("group")
+            .agg(agg_map | {"has_pos_rel_mae": "mean"})
+            .rename(columns={"has_pos_rel_mae": "share_folds_relMAE>0"})
             .sort_values("rel_delta_MAE", ascending=False)
             .reset_index()
         )
-        if compute_pi
-        and (pi_groups_folds_df is not None)
-        and (not pi_groups_folds_df.empty)
-        else None
-    )
+    else:
+        pi_groups_summary_df = None
 
     return {
         "fold_metrics_df": fold_metrics_df,
@@ -978,7 +990,7 @@ def compare_model_to_dummy_with_bootstrap(
     }
 
 
-def test_elasticnet_outperforms_dummy_regressor(
+def test_en_or_rf_outperforms_dummy_regressor(
     X,
     y,
     pseudonym,
@@ -1007,183 +1019,204 @@ def test_elasticnet_outperforms_dummy_regressor(
         f"actual={rtscv.actual_n_splits(len(X_preprocessed))}"
     )
 
-    en = ElasticNet(
-        max_iter=CONFIG["en"]["max_iter"],
-        tol=CONFIG["en"]["tol"],
-        random_state=RANDOM_STATE,
-    )
+    is_significantly_better_dict = {}
+    for model_type in ["EN", "RF"]:
+        print(f"--- Evaluating model type {model_type} for {pseudonym} ---")
+        if model_type == "EN":
 
-    param_grid = {
-        "alpha": CONFIG["en"]["param_grid"]["model__alpha"],
-        "l1_ratio": CONFIG["en"]["param_grid"]["model__l1_ratio"],
-    }
+            en = ElasticNet(
+                max_iter=CONFIG["en"]["max_iter"],
+                tol=CONFIG["en"]["tol"],
+                random_state=RANDOM_STATE,
+            )
 
-    en_gs = GridSearchCV(
-        estimator=en,
-        param_grid=param_grid,
-        cv=rtscv,
-        n_jobs=-1,
-        refit=True,
-        verbose=0,
-        scoring="r2",
-    )
+            param_grid = {
+                "alpha": CONFIG["en"]["param_grid"]["model__alpha"],
+                "l1_ratio": CONFIG["en"]["param_grid"]["model__l1_ratio"],
+            }
 
-    en_gs.fit(X_preprocessed, y)
+            en_gs = GridSearchCV(
+                estimator=en,
+                param_grid=param_grid,
+                cv=rtscv,
+                n_jobs=-1,
+                refit=True,
+                verbose=0,
+                scoring=CONFIG["en"]["scoring"],
+            )
 
-    # ---- paste or import the bootstrap functions from earlier ----
-    # (bootstrap_paired_mean_diff, compare_model_to_dummy_with_bootstrap)
-    # Assume they are available in scope. If not, paste them above.
+            en_gs.fit(X_preprocessed, y)
 
-    # 1) Extract best hyperparameters from GridSearchCV
-    best_alpha = en_gs.best_params_.get("alpha", en_gs.best_params_.get("model__alpha"))
-    best_l1_ratio = en_gs.best_params_.get(
-        "l1_ratio", en_gs.best_params_.get("model__l1_ratio")
-    )
+            # ---- paste or import the bootstrap functions from earlier ----
+            # (bootstrap_paired_mean_diff, compare_model_to_dummy_with_bootstrap)
+            # Assume they are available in scope. If not, paste them above.
 
-    en_best = ElasticNet(
-        alpha=best_alpha,
-        l1_ratio=best_l1_ratio,
-        max_iter=CONFIG["en"]["max_iter"],
-        tol=CONFIG["en"]["tol"],
-        random_state=RANDOM_STATE,
-    )
+            # 1) Extract best hyperparameters from GridSearchCV
+            best_alpha = en_gs.best_params_.get(
+                "alpha", en_gs.best_params_.get("model__alpha")
+            )
+            best_l1_ratio = en_gs.best_params_.get(
+                "l1_ratio", en_gs.best_params_.get("model__l1_ratio")
+            )
 
-    # 2) Manual CV over the SAME tscv to get fold-wise metrics  (pandas-safe)
-    r2_model_folds, r2_dummy_folds = [], []
-    mae_model_folds, mae_dummy_folds = [], []
-    n_test_folds = []
+            model = ElasticNet(
+                alpha=best_alpha,
+                l1_ratio=best_l1_ratio,
+                max_iter=CONFIG["en"]["max_iter"],
+                tol=CONFIG["en"]["tol"],
+                random_state=RANDOM_STATE,
+            )
+        else:
+            rf = Pipeline([("model", RandomForestRegressor(random_state=RANDOM_STATE))])
+            rf_gs = GridSearchCV(
+                estimator=rf,
+                param_grid=CONFIG["rf"]["param_grid"],
+                scoring=CONFIG["rf"]["scoring"],
+                cv=rtscv,
+                n_jobs=-1,
+                refit=True,
+                error_score="raise",
+            )
+            rf_gs.fit(X_preprocessed, y)
+            rf_best_params = rf_gs.best_params_
 
-    for fold_id, (tr_idx, te_idx) in enumerate(rtscv.split(X_preprocessed), start=1):
-        # IMPORTANT: use .iloc for positional indexing on DataFrames
-        X_tr = X_preprocessed.iloc[tr_idx, :]
-        X_te = X_preprocessed.iloc[te_idx, :]
-        y_tr = y[tr_idx]
-        y_te = y[te_idx]
+            rf_best_params_plain = {
+                k.split("__", 1)[1]: v
+                for k, v in rf_best_params.items()
+                if k.startswith("model__")
+            }
 
-        # Fit Elastic Net with best params on the fold's TRAIN
-        en_best.fit(X_tr, y_tr)
-        y_pred_model = en_best.predict(X_te)
+            model = RandomForestRegressor(
+                random_state=RANDOM_STATE, **rf_best_params_plain
+            )
 
-        # Baseline: DummyRegressor (mean of TRAIN y)
-        dum = DummyRegressor(strategy="mean")
-        dum.fit(
-            y_tr.reshape(-1, 1) if y_tr.ndim == 1 else y_tr, y_tr
-        )  # sklearn ignores X for Dummy
-        # Simpler/clearer:
-        dum = DummyRegressor(strategy="mean").fit(np.zeros((len(y_tr), 1)), y_tr)
-        y_pred_dummy = dum.predict(np.zeros((len(y_te), 1)))
+        # 2) Manual CV over the SAME tscv to get fold-wise metrics  (pandas-safe)
+        r2_model_folds, r2_dummy_folds = [], []
+        mae_model_folds, mae_dummy_folds = [], []
+        n_test_folds = []
 
-        # Metrics
-        r2_model_folds.append(r2_score(y_te, y_pred_model))
-        r2_dummy_folds.append(r2_score(y_te, y_pred_dummy))
-        mae_model_folds.append(mean_absolute_error(y_te, y_pred_model))
-        mae_dummy_folds.append(mean_absolute_error(y_te, y_pred_dummy))
-        n_test_folds.append(len(te_idx))
+        for fold_id, (tr_idx, te_idx) in enumerate(
+            rtscv.split(X_preprocessed), start=1
+        ):
+            # IMPORTANT: use .iloc for positional indexing on DataFrames
+            X_tr = X_preprocessed.iloc[tr_idx, :]
+            X_te = X_preprocessed.iloc[te_idx, :]
+            y_tr = y[tr_idx]
+            y_te = y[te_idx]
 
-    r2_model_folds = np.asarray(r2_model_folds, dtype=float)
-    r2_dummy_folds = np.asarray(r2_dummy_folds, dtype=float)
-    mae_model_folds = np.asarray(mae_model_folds, dtype=float)
-    mae_dummy_folds = np.asarray(mae_dummy_folds, dtype=float)
-    n_test_folds = np.asarray(n_test_folds, dtype=int)
+            # Fit Elastic Net with best params on the fold's TRAIN
+            model.fit(X_tr, y_tr)
+            y_pred_model = model.predict(X_te)
 
-    # 3) Bootstrap: is EN significantly better than Dummy?
-    boot_results = compare_model_to_dummy_with_bootstrap(
-        r2_model=r2_model_folds,
-        r2_dummy=r2_dummy_folds,
-        mae_model=mae_model_folds,
-        mae_dummy=mae_dummy_folds,
-        n_test_samples=n_test_folds,  # weights per fold (recommended)
-        B=20000,
-        seed=123,
-    )
+            # Baseline: DummyRegressor (mean of TRAIN y)
+            dum = DummyRegressor(strategy="mean")
+            dum.fit(
+                y_tr.reshape(-1, 1) if y_tr.ndim == 1 else y_tr, y_tr
+            )  # sklearn ignores X for Dummy
+            # Simpler/clearer:
+            dum = DummyRegressor(strategy="mean").fit(np.zeros((len(y_tr), 1)), y_tr)
+            y_pred_dummy = dum.predict(np.zeros((len(y_te), 1)))
 
-    # 4) Print a concise report
-    r2_res = boot_results["R2"]
-    mae_res = boot_results["MAE"]
+            # Metrics
+            r2_model_folds.append(r2_score(y_te, y_pred_model))
+            r2_dummy_folds.append(r2_score(y_te, y_pred_dummy))
+            mae_model_folds.append(mean_absolute_error(y_te, y_pred_model))
+            mae_dummy_folds.append(mean_absolute_error(y_te, y_pred_dummy))
+            n_test_folds.append(len(te_idx))
 
-    print("=== Elastic Net vs Dummy (paired bootstrap over CV folds) ===")
-    print(f"Best params: alpha={best_alpha}, l1_ratio={best_l1_ratio}")
-    print(
-        f"ΔR²  (EN − Dummy): mean={r2_res['mean_diff']:.3f}, "
-        f"95% CI=[{r2_res['ci_low']:.3f}, {r2_res['ci_high']:.3f}], "
-        f"one-sided p={r2_res['p_value']:.4f}, n_folds={r2_res['n']}"
-    )
-    print(
-        f"ΔMAE (Dummy − EN): mean={mae_res['mean_diff']:.3f}, "
-        f"95% CI=[{mae_res['ci_low']:.3f}, {mae_res['ci_high']:.3f}], "
-        f"one-sided p={mae_res['p_value']:.4f}, n_folds={mae_res['n']}"
-    )
+        r2_model_folds = np.asarray(r2_model_folds, dtype=float)
+        r2_dummy_folds = np.asarray(r2_dummy_folds, dtype=float)
+        mae_model_folds = np.asarray(mae_model_folds, dtype=float)
+        mae_dummy_folds = np.asarray(mae_dummy_folds, dtype=float)
+        n_test_folds = np.asarray(n_test_folds, dtype=int)
 
-    # Optional: make a tidy DataFrame of per-fold metrics for logging
-    per_fold_df = pd.DataFrame(
-        {
-            "fold": np.arange(1, len(r2_model_folds) + 1),
-            "r2_en": r2_model_folds,
-            "r2_dummy": r2_dummy_folds,
-            "mae_en": mae_model_folds,
-            "mae_dummy": mae_dummy_folds,
-            "n_test": n_test_folds,
-            "delta_r2": r2_model_folds - r2_dummy_folds,
-            "delta_mae": mae_dummy_folds - mae_model_folds,  # improvement if > 0
-        }
-    )
-    print(per_fold_df)
-
-    plot_elasticnet_vs_dummyregressor(
-        per_fold_df=per_fold_df,
-        boot_results=boot_results,
-        out_path=f"{RESULTS_DIR}/{pseudonym}_elasticnet_vs_dummy.png",
-    )
-
-    # significance thresholds
-    ALPHA = 0.05  # one-sided test level
-
-    r2_res = boot_results["R2"]
-    mae_res = boot_results["MAE"]
-
-    def _safe_pos(x):
-        try:
-            return (x is not None) and np.isfinite(x) and (x > 0)
-        except Exception:
-            return False
-
-    # Require BOTH: one-sided p-value < alpha AND 95% CI excludes 0 on the good side
-    is_significant_r2 = (
-        (r2_res["p_value"] < ALPHA)
-        and _safe_pos(r2_res["mean_diff"])
-        and _safe_pos(r2_res["ci_low"])
-    )
-
-    is_significant_mae = (
-        (mae_res["p_value"] < ALPHA)
-        and _safe_pos(mae_res["mean_diff"])
-        and _safe_pos(mae_res["ci_low"])
-    )
-
-    # Optional: if you want Bonferroni for the two metrics, uncomment:
-    # ALPHA_EACH = ALPHA / 2.0
-    # is_significant_r2 = (r2_res["p_value"] < ALPHA_EACH) and _safe_pos(r2_res["ci_low"])
-    # is_significant_mae = (mae_res["p_value"] < ALPHA_EACH) and _safe_pos(mae_res["ci_low"])
-
-    proceed = is_significant_r2 or is_significant_mae
-
-    if proceed:
-        print(
-            "✅ Elastic Net performs significantly better than DummyRegressor "
-            f"({'R²' if is_significant_r2 else ''}{' & ' if is_significant_r2 and is_significant_mae else ''}"
-            f"{'MAE' if is_significant_mae else ''})."
+        # 3) Bootstrap: is EN significantly better than Dummy?
+        boot_results = compare_model_to_dummy_with_bootstrap(
+            r2_model=r2_model_folds,
+            r2_dummy=r2_dummy_folds,
+            mae_model=mae_model_folds,
+            mae_dummy=mae_dummy_folds,
+            n_test_samples=n_test_folds,  # weights per fold (recommended)
+            B=20000,
+            seed=123,
         )
-        run_further_analysis = True
-    else:
-        print("⚠️ Elastic Net not significantly better — skipping downstream steps.")
-        run_further_analysis = False
 
-    return run_further_analysis
+        # Optional: make a tidy DataFrame of per-fold metrics for logging
+        per_fold_df = pd.DataFrame(
+            {
+                "fold": np.arange(1, len(r2_model_folds) + 1),
+                "r2_en": r2_model_folds,
+                "r2_dummy": r2_dummy_folds,
+                "mae_en": mae_model_folds,
+                "mae_dummy": mae_dummy_folds,
+                "n_test": n_test_folds,
+                "delta_r2": r2_model_folds - r2_dummy_folds,
+                "delta_mae": mae_dummy_folds - mae_model_folds,  # improvement if > 0
+            }
+        )
+        print(per_fold_df)
+
+        plot_model_vs_dummyregressor(
+            model_type=model_type,
+            per_fold_df=per_fold_df,
+            boot_results=boot_results,
+            out_path=f"{RESULTS_DIR}/{pseudonym}_{model_type}_vs_dummy.png",
+        )
+
+        # significance thresholds
+        ALPHA = 0.05  # one-sided test level
+
+        r2_res = boot_results["R2"]
+        mae_res = boot_results["MAE"]
+
+        def _safe_pos(x):
+            try:
+                return (x is not None) and np.isfinite(x) and (x > 0)
+            except Exception:
+                return False
+
+        # Require BOTH: one-sided p-value < alpha AND 95% CI excludes 0 on the good side
+        is_significant_r2 = (
+            (r2_res["p_value"] < ALPHA)
+            and _safe_pos(r2_res["mean_diff"])
+            and _safe_pos(r2_res["ci_low"])
+        )
+
+        is_significant_mae = (
+            (mae_res["p_value"] < ALPHA)
+            and _safe_pos(mae_res["mean_diff"])
+            and _safe_pos(mae_res["ci_low"])
+        )
+
+        # Optional: if you want Bonferroni for the two metrics, uncomment:
+        # ALPHA_EACH = ALPHA / 2.0
+        # is_significant_r2 = (r2_res["p_value"] < ALPHA_EACH) and _safe_pos(r2_res["ci_low"])
+        # is_significant_mae = (mae_res["p_value"] < ALPHA_EACH) and _safe_pos(mae_res["ci_low"])
+
+        is_significantly_better = is_significant_r2 or is_significant_mae
+
+        if is_significantly_better:
+            print(
+                f"✅ {model_type} performs significantly better than DummyRegressor "
+                f"({'R²' if is_significant_r2 else ''}{' & ' if is_significant_r2 and is_significant_mae else ''}"
+                f"{'MAE' if is_significant_mae else ''})."
+            )
+            is_significantly_better_dict[model_type] = True
+        else:
+            print(
+                f"⚠️ {model_type} not significantly better — skipping downstream steps."
+            )
+            is_significantly_better_dict[model_type] = False
+
+    return is_significantly_better_dict.get(
+        "EN", False
+    ), is_significantly_better_dict.get("RF", False)
 
 
 # %% Main Processing Function ===================================================
 def process_participants(df_raw, pseudonyms, target_column):
     results = {}
+    participant_results = {}
     rmssd_values_phq2 = []
     plot_data = {}
 
@@ -1214,10 +1247,11 @@ def process_participants(df_raw, pseudonyms, target_column):
         n = len(y)
         if n < (min_train_size + max(min_test_size, fixed_test_size)):
             print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
+            participant_results[pseudonym] = f"too less data points ({n}) to proceed"
             continue
 
-        elasticnet_outperforms_dummy_regressor = (
-            test_elasticnet_outperforms_dummy_regressor(
+        en_outperforms_dummy_regressor, rf_outperforms_dummy_regressor = (
+            test_en_or_rf_outperforms_dummy_regressor(
                 X=X,
                 y=y,
                 pseudonym=pseudonym,
@@ -1229,10 +1263,11 @@ def process_participants(df_raw, pseudonyms, target_column):
             )
         )
 
-        if not elasticnet_outperforms_dummy_regressor:
-            print(
-                f"[INFO] {pseudonym}: ElasticNet does not outperform Dummy; skipping."
-            )
+        message = f"[INFO] {pseudonym}: ElasticNet outperforms Dummy: {en_outperforms_dummy_regressor}, RandomForest outperforms Dummy: {rf_outperforms_dummy_regressor}"
+        print(message)
+        participant_results[pseudonym] = message
+        if not en_outperforms_dummy_regressor and not rf_outperforms_dummy_regressor:
+            print("[INFO] skipping")
             continue
 
         # --- time-based initial split by CONFIG["init_frac_for_hp"] ----------
@@ -1684,6 +1719,9 @@ def process_participants(df_raw, pseudonyms, target_column):
                 ),
                 title=f"{pseudonym} – RF: Test-Fenster & Metriken",
             )
+
+    participant_results_df = pd.DataFrame.from_dict(participant_results, orient="index")
+    participant_results_df.to_csv(f"{RESULTS_DIR}/participant_processing_summary.csv")
 
     return results, plot_data
 

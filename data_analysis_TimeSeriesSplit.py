@@ -119,6 +119,8 @@ unique_groups = feature_config["category"].unique().tolist()
 for ug in unique_groups:
     COARSE_GROUPS[ug] = _feats([ug])
 
+CONFIG["feature_groups"] = COARSE_GROUPS
+
 
 # ============ Feature-spezifische Scaler ======================================
 class Log1pScaler(BaseEstimator, TransformerMixin):

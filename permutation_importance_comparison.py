@@ -9,7 +9,62 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-DATA_DIR = "results_dummycomparison_timeaware_5050_split_newdata"
+DATA_DIR = "results_dummycomparison_timeaware_5050_split_v10"
+
+# ===== Consistent styles for stacked bars (up to 15 groups) =====
+COLORS_15 = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+    "#393b79",
+    "#637939",
+    "#8c6d31",
+    "#843c39",
+    "#7b4173",
+]
+
+HATCHES_15 = [
+    "/",
+    "\\",
+    "|",
+    "-",
+    "+",
+    "x",
+    "o",
+    "O",
+    ".",
+    "*",
+    "///",
+    "\\\\\\",
+    "||",
+    "--",
+    "xx",
+]
+
+
+def build_style_map(groups, preferred_order=None):
+    """
+    Create a stable (order, color_map, hatch_map) for the given group names.
+    - preferred_order: list to pin a canonical order; others follow alphabetically.
+    """
+    groups = list(dict.fromkeys(groups))  # keep unique, stable
+    if preferred_order:
+        base = [g for g in preferred_order if g in groups]
+        tail = sorted([g for g in groups if g not in base])
+        order = base + tail
+    else:
+        order = sorted(groups)
+
+    color_map = {g: COLORS_15[i % len(COLORS_15)] for i, g in enumerate(order)}
+    hatch_map = {g: HATCHES_15[i % len(HATCHES_15)] for i, g in enumerate(order)}
+    return order, color_map, hatch_map
 
 
 def extract_pid(path):
@@ -324,21 +379,6 @@ def plot_categorical_grid(df_tidy, model_tag, out_png, feature_order=None):
     print(f"Saved: {out_png}")
 
 
-# Optional: a colorblind-friendly palette (Okabe–Ito, repeated if needed)
-OKABE_ITO = [
-    "#0072B2",
-    "#E69F00",
-    "#009E73",
-    "#D55E00",
-    "#CC79A7",
-    "#56B4E9",
-    "#F0E442",
-    "#000000",
-]
-
-HATCH_PATTERNS = ["/", "\\", "x", "o", "-", "+", ".", "*"]
-
-
 def stacked_positive_relmae(
     df_tidy,
     model_tag,
@@ -347,6 +387,9 @@ def stacked_positive_relmae(
     top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
     label_totals=True,  # print total per bar on top
     sort_participants_by_total=True,  # sort participants by total height
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
 ):
     """
     Stacked bar plot per participant with only positive relative MAE contributions.
@@ -400,23 +443,26 @@ def stacked_positive_relmae(
         figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
     )
 
-    bottoms = np.zeros(len(pids))
-    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
-    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
-        : len(features)
-    ]
+    # --- Use shared styles ---
+    style_order = style_order or STYLE_ORDER
+    color_map = color_map or COLOR_MAP
+    hatch_map = hatch_map or HATCH_MAP
 
+    # Plot features in the canonical style order, filtered to what's present
+    plot_features = [f for f in style_order if f in features]
+
+    bottoms = np.zeros(len(pids))
     bars_by_feat = {}
-    for i, feat in enumerate(features):
+    for feat in plot_features:
         heights = pivot.loc[feat].values
         bars = ax.bar(
             x,
             heights,
             bottom=bottoms,
             label=feat,
-            color=colors[i],
+            color=color_map.get(feat, "#cccccc"),
             edgecolor="black",
-            hatch=hatches[i],
+            hatch=hatch_map.get(feat, ""),
         )
         bars_by_feat[feat] = bars
         bottoms += heights
@@ -453,6 +499,9 @@ def stacked_positive_relmae_with_std(
     top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
     label_totals=True,  # print total per bar on top
     sort_participants_by_total=True,  # sort participants by total height
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
 ):
     """
     Stacked bar plot per participant with only positive relative MAE contributions.
@@ -528,16 +577,22 @@ def stacked_positive_relmae_with_std(
         figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
     )
 
-    bottoms = np.zeros(len(pids))
-    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
-    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
-        : len(features)
-    ]
+    # --- Use shared styles ---
+    style_order = style_order or STYLE_ORDER
+    color_map = color_map or COLOR_MAP
+    hatch_map = hatch_map or HATCH_MAP
 
+    plot_features = [f for f in style_order if f in features]
+
+    bottoms = np.zeros(len(pids))
     bars_by_feat = {}
-    for i, feat in enumerate(features):
+    for feat in plot_features:
         heights = pivot.loc[feat].values
-        std_vals = std_piv.loc[feat].values
+        std_vals = (
+            std_piv.loc[feat].values
+            if feat in std_piv.index
+            else np.zeros_like(heights)
+        )
         std_vals = np.where(heights > 0, std_vals, 0.0)
         widths = std_to_width(std_vals, s_lo, s_hi)
         bars = ax.bar(
@@ -546,9 +601,9 @@ def stacked_positive_relmae_with_std(
             width=widths,
             bottom=bottoms,
             label=feat,
-            color=colors[i],
+            color=color_map.get(feat, "#cccccc"),
             edgecolor="black",
-            hatch=hatches[i],
+            hatch=hatch_map.get(feat, ""),
         )
         bars_by_feat[feat] = bars
         bottoms += heights
@@ -592,6 +647,17 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
 # Compute one shared y-axis order across EN and RF
 shared_order = compute_shared_feature_order(df_en, df_rf)
 
+# Build a single style map from the union of all features across EN & RF
+all_features_for_style = sorted(
+    set(df_en["feature"].dropna().unique()).union(
+        set(df_rf["feature"].dropna().unique())
+    )
+)
+STYLE_ORDER, COLOR_MAP, HATCH_MAP = build_style_map(
+    all_features_for_style,
+    preferred_order=shared_order,  # keeps style order aligned to your shared y-order
+)
+
 # Plot continuous heatmaps with the SAME y order
 for model, df in [("EN", df_en), ("RF", df_rf)]:
     fig_path = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_heatmap.png")
@@ -614,6 +680,9 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         top_k=12,
         label_totals=True,
         sort_participants_by_total=False,
+        style_order=STYLE_ORDER,
+        color_map=COLOR_MAP,
+        hatch_map=HATCH_MAP,
     )
     outputs.append(out)
 
@@ -626,6 +695,9 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         top_k=12,
         label_totals=True,
         sort_participants_by_total=False,
+        style_order=STYLE_ORDER,
+        color_map=COLOR_MAP,
+        hatch_map=HATCH_MAP,
     )
     outputs.append(out)
 
@@ -858,7 +930,15 @@ def per_participant_heatmap_categorical(df_pid, pid, model_tag, out_png):
 
 
 def per_participant_stacked_positive(
-    df_pid, pid, model_tag, out_png, top_k=None, label_totals=True
+    df_pid,
+    pid,
+    model_tag,
+    out_png,
+    top_k=None,
+    label_totals=True,
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
 ):
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
@@ -911,22 +991,23 @@ def per_participant_stacked_positive(
         figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * len(features)))
     )
 
-    bottoms = np.zeros(len(fold_order))
-    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
-    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
-        : len(features)
-    ]
+    style_order = style_order or STYLE_ORDER
+    color_map = color_map or COLOR_MAP
+    hatch_map = hatch_map or HATCH_MAP
 
-    for i, feat in enumerate(features):
+    plot_features = [f for f in style_order if f in features]
+
+    bottoms = np.zeros(len(fold_order))
+    for feat in plot_features:
         heights = piv.loc[feat].values
         ax.bar(
             x,
             heights,
             bottom=bottoms,
             label=feat,
-            color=colors[i],
+            color=color_map.get(feat, "#cccccc"),
             edgecolor="black",
-            hatch=hatches[i],
+            hatch=hatch_map.get(feat, ""),
         )
         bottoms += heights
 
@@ -978,7 +1059,15 @@ def per_participant_stacked_positive(
 
 
 def per_participant_stacked_positive_with_std(
-    df_pid, pid, model_tag, out_png, top_k=None, label_totals=True
+    df_pid,
+    pid,
+    model_tag,
+    out_png,
+    top_k=None,
+    label_totals=True,
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
 ):
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
@@ -1053,16 +1142,20 @@ def per_participant_stacked_positive_with_std(
         figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * len(features)))
     )
 
-    bottoms = np.zeros(len(fold_order))
-    colors = (OKABE_ITO * ((len(features) // len(OKABE_ITO)) + 1))[: len(features)]
-    hatches = (HATCH_PATTERNS * ((len(features) // len(HATCH_PATTERNS)) + 1))[
-        : len(features)
-    ]
+    style_order = style_order or STYLE_ORDER
+    color_map = color_map or COLOR_MAP
+    hatch_map = hatch_map or HATCH_MAP
 
-    for i, feat in enumerate(features):
+    plot_features = [f for f in style_order if f in features]
+
+    bottoms = np.zeros(len(fold_order))
+    for feat in plot_features:
         heights = piv.loc[feat].values
-        # zero-out errors where there is no bar height to avoid floating whiskers
-        std_vals = std_piv.loc[feat].values
+        std_vals = (
+            std_piv.loc[feat].values
+            if feat in std_piv.index
+            else np.zeros_like(heights)
+        )
         std_vals = np.where(heights > 0, std_vals, 0.0)
         widths = std_to_width(std_vals, s_lo, s_hi)
 
@@ -1072,9 +1165,9 @@ def per_participant_stacked_positive_with_std(
             bottom=bottoms,
             width=widths,
             label=feat,
-            color=colors[i],
+            color=color_map.get(feat, "#cccccc"),
             edgecolor="black",
-            hatch=hatches[i],
+            hatch=hatch_map.get(feat, ""),
         )
         bottoms += heights
 
@@ -1148,7 +1241,15 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive.png"
         )
         per_participant_stacked_positive(
-            df_pid, pid, model_tag, out3, top_k=12, label_totals=True
+            df_pid,
+            pid,
+            model_tag,
+            out3,
+            top_k=12,
+            label_totals=True,
+            style_order=STYLE_ORDER,
+            color_map=COLOR_MAP,
+            hatch_map=HATCH_MAP,
         )
 
         # Stacked positive bar per fold with std-based widths
@@ -1156,5 +1257,13 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive_std_widths.png"
         )
         per_participant_stacked_positive_with_std(
-            df_pid, pid, model_tag, out4, top_k=12, label_totals=True
+            df_pid,
+            pid,
+            model_tag,
+            out4,
+            top_k=12,
+            label_totals=True,
+            style_order=STYLE_ORDER,
+            color_map=COLOR_MAP,
+            hatch_map=HATCH_MAP,
         )

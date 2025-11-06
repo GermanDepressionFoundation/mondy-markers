@@ -29,8 +29,8 @@ CONFIG = {
     "random_state": 42,
     "top_k": 15,
     "paths": {
-        "data": "data/df_merged_with_mnar_v9.pickle",
-        "results_dir": "results_dummycomparison_timeaware_5050_split_newdata",
+        "data": "data/df_merged_mnar_v10 1.pickle",
+        "results_dir": "results_dummycomparison_timeaware_5050_split_v10",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
@@ -102,7 +102,7 @@ RANDOM_STATE = CONFIG["random_state"]
 PHQ2_COLUMN = CONFIG["targets"]["phq2"]
 PHQ9_COLUMN = CONFIG["targets"]["phq9"]
 
-feature_config = pd.read_csv("config/feature_config_v9.csv")
+feature_config = pd.read_csv("config/feature_config_v10.csv")
 LOG1P_COLS = feature_config[feature_config["scaler"] == "log1p"]["feature"].tolist()
 ZSCORE_COLS = feature_config[feature_config["scaler"] == "zscore"]["feature"].tolist()
 MINMAX_COLS = feature_config[feature_config["scaler"] == "minmax"]["feature"].tolist()
@@ -711,18 +711,15 @@ def run_explain_over_splits(
                     lower=0.0
                 )
 
-        # aggregate: median for deltas, (optionally) mean for the per-fold std columns
+        # aggregate: mean for deltas
         agg_map = {
-            "rel_delta_MAE": "median",
-            "rel_delta_R2": "median",
-            "delta_R2": "median",
-            "delta_MAE": "median",
+            "rel_delta_MAE": "mean",
+            "rel_delta_R2": "mean",
+            "delta_R2": "mean",
+            "delta_MAE": "mean",
+            "delta_R2_std": "mean",
+            "delta_MAE_std": "mean",
         }
-        # keep these if present; they summarize the variability of the permutation runs within each fold
-        if "delta_R2_std" in df_agg.columns:
-            agg_map["delta_R2_std"] = "mean"
-        if "delta_MAE_std" in df_agg.columns:
-            agg_map["delta_MAE_std"] = "mean"
 
         # (optional) share of folds with strictly positive contribution — useful for stability
         df_agg["has_pos_rel_mae"] = (df_agg.get("rel_delta_MAE", 0.0) > 0).astype(float)

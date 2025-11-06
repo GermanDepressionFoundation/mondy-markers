@@ -1,3 +1,4 @@
+import colorsys
 import glob
 import os
 import re
@@ -6,13 +7,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import cm
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, to_rgb
 from matplotlib.patches import Patch
 
 DATA_DIR = "results_dummycomparison_timeaware_5050_split_v10"
 
-# ===== Consistent styles for stacked bars (up to 15 groups) =====
-COLORS_15 = [
+# ===== Prefix-aware, consistent styles =====
+# distinct base hues (colorblind-aware-ish). these are cluster *anchors*.
+BASE_HUES = [
     "#1f77b4",
     "#ff7f0e",
     "#2ca02c",
@@ -30,41 +32,106 @@ COLORS_15 = [
     "#7b4173",
 ]
 
-HATCHES_15 = [
-    "/",
-    "\\",
-    "|",
-    "-",
-    "+",
-    "x",
-    "o",
-    "O",
-    ".",
-    "*",
-    "///",
-    "\\\\\\",
-    "||",
-    "--",
-    "xx",
-]
+# base hatch families per prefix; we increase "density" within a family
+HATCH_BASES = ["/", "\\", "|", "-", "+", "x", "o", "O", ".", "*"]
 
 
-def build_style_map(groups, preferred_order=None):
+def _hex(rgb_tuple):
+    r, g, b = [max(0, min(1, c)) for c in rgb_tuple]
+    return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
+
+def _shade_variants(base_hex, k, n, s_range=(0.55, 0.85), v_range=(0.60, 0.95)):
     """
-    Create a stable (order, color_map, hatch_map) for the given group names.
-    - preferred_order: list to pin a canonical order; others follow alphabetically.
+    Create k-th shade (0-index) out of n for a base color by varying saturation/value.
+    Keeps hue roughly constant so items with same prefix "feel" related.
     """
-    groups = list(dict.fromkeys(groups))  # keep unique, stable
+    r, g, b = to_rgb(base_hex)
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    # Evenly space within ranges; center around original s/v
+    s_lo, s_hi = s_range
+    v_lo, v_hi = v_range
+    if n <= 1:
+        s_new, v_new = s, v
+    else:
+        t = k / (n - 1)
+        s_new = s_lo + t * (s_hi - s_lo)
+        v_new = v_hi - t * (v_hi - v_lo)  # light -> dark as k increases
+    rr, gg, bb = colorsys.hsv_to_rgb(h, s_new, v_new)
+    return _hex((rr, gg, bb))
+
+
+def _hatch_variant(base_hatch, k, n):
+    """
+    Pick a hatch of the same family with increasing density.
+    e.g., '/', '//', '///' ... or '.', '..', '...'
+    """
+    if n <= 1:
+        return base_hatch
+    reps = 1 + min(3, int(round(1 + 2 * (k / max(1, n - 1)))))  # 1..4
+    return base_hatch * reps
+
+
+def build_style_map_prefix(groups, preferred_order=None):
+    """
+    Stable (order, color_map, hatch_map) where groups that share the first
+    3 letters get related shades and hatch family.
+    - preferred_order: if provided, fixes canonical legend order.
+    """
+    groups = list(dict.fromkeys(groups))  # unique, stable
     if preferred_order:
-        base = [g for g in preferred_order if g in groups]
-        tail = sorted([g for g in groups if g not in base])
-        order = base + tail
+        head = [g for g in preferred_order if g in groups]
+        tail = [g for g in groups if g not in head]
+        order = head + sorted(tail)
     else:
         order = sorted(groups)
 
-    color_map = {g: COLORS_15[i % len(COLORS_15)] for i, g in enumerate(order)}
-    hatch_map = {g: HATCHES_15[i % len(HATCHES_15)] for i, g in enumerate(order)}
+    # cluster by first 3 letters
+    def pref(g):
+        return (g[:3] if isinstance(g, str) and len(g) >= 3 else str(g)[:3]).lower()
+
+    prefix_to_members = {}
+    for g in order:
+        prefix_to_members.setdefault(pref(g), []).append(g)
+
+    # assign base hue + hatch family per prefix
+    color_map, hatch_map = {}, {}
+    prefixes = sorted(prefix_to_members.keys())
+    for p_idx, p in enumerate(prefixes):
+        members = prefix_to_members[p]
+        base_hex = BASE_HUES[p_idx % len(BASE_HUES)]
+        base_hatch = HATCH_BASES[p_idx % len(HATCH_BASES)]
+
+        # order members stably within prefix (respect preferred_order part already in 'order')
+        members = [g for g in order if g in members]
+
+        n = len(members)
+        for k, g in enumerate(members):
+            color_map[g] = _shade_variants(base_hex, k, n)
+            hatch_map[g] = _hatch_variant(base_hatch, k, n)
+
     return order, color_map, hatch_map
+
+
+def sort_legend_alphanum(ax):
+    """
+    Sort the legend entries alphanumerically ascending by label text.
+    Works for bar plots and other standard Matplotlib legend types.
+    """
+    handles, labels = ax.get_legend_handles_labels()
+    if not labels:
+        return
+    # Sort alphabetically (case-insensitive)
+    sorted_pairs = sorted(zip(labels, handles), key=lambda x: x[0].lower())
+    labels_sorted, handles_sorted = zip(*sorted_pairs)
+    ax.legend(
+        handles_sorted,
+        labels_sorted,
+        title=ax.get_legend().get_title().get_text() if ax.get_legend() else None,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        ncol=1,
+    )
 
 
 def extract_pid(path):
@@ -484,6 +551,7 @@ def stacked_positive_relmae(
 
     # Legend outside for readability
     ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+    sort_legend_alphanum(ax)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -625,6 +693,7 @@ def stacked_positive_relmae_with_std(
 
     # Legend outside for readability
     ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+    sort_legend_alphanum(ax)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -644,18 +713,18 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
     df.to_csv(combined_path, index=False)
     outputs.append(combined_path)
 
-# Compute one shared y-axis order across EN and RF
 shared_order = compute_shared_feature_order(df_en, df_rf)
 
-# Build a single style map from the union of all features across EN & RF
+# Union of features across both models for a single global mapping
 all_features_for_style = sorted(
     set(df_en["feature"].dropna().unique()).union(
         set(df_rf["feature"].dropna().unique())
     )
 )
-STYLE_ORDER, COLOR_MAP, HATCH_MAP = build_style_map(
+
+STYLE_ORDER, COLOR_MAP, HATCH_MAP = build_style_map_prefix(
     all_features_for_style,
-    preferred_order=shared_order,  # keeps style order aligned to your shared y-order
+    preferred_order=shared_order,  # keeps canonical order consistent with your heatmaps
 )
 
 # Plot continuous heatmaps with the SAME y order
@@ -1047,6 +1116,7 @@ def per_participant_stacked_positive(
         f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
     )
     ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+    sort_legend_alphanum(ax)
     # Add top margin for annotations (extra headroom)
     ymax = totals_fold.max() if len(totals_fold) else 0.0
     if np.isfinite(ymax) and ymax > 0:
@@ -1207,6 +1277,7 @@ def per_participant_stacked_positive_with_std(
         f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
     )
     ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+    sort_legend_alphanum(ax)
     # Add top margin for annotations (extra headroom)
     ymax = totals_fold.max() if len(totals_fold) else 0.0
     if np.isfinite(ymax) and ymax > 0:

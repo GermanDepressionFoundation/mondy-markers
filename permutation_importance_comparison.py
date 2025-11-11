@@ -704,7 +704,7 @@ def across_participants_stacked_positive_relmae(
                 ax.text(
                     xi,
                     y_base + offset + line_gap,
-                    f"R²={mean_r2:.2f}",
+                    rf"$\overline{{R^2}}$={mean_r2:.2f}",
                     ha="center",
                     va="bottom",
                     fontsize=6,
@@ -753,7 +753,9 @@ def across_participants_stacked_positive_relmae(
     ax.set_ylabel("Relative feature importance")
 
     if plot_features:
-        ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+        ax.legend(
+            title="Feature Group", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1
+        )
         sort_legend_alphanum(ax)
 
     # --- Headroom for labels
@@ -1221,7 +1223,7 @@ def per_participant_stacked_positive(
                 ax.text(
                     xi,
                     y_base + offset + line_gap,
-                    f"R²={r2_val:.2f}",
+                    rf"$\overline{{R^2}}$={r2_val:.2f}",
                     ha="center",
                     va="bottom",
                     fontsize=6,
@@ -1247,7 +1249,7 @@ def per_participant_stacked_positive(
     # (no title)
 
     if plot_features:
-        ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+        ax.legend(title="Feature Group", bbox_to_anchor=(1.02, 1), loc="upper left")
         sort_legend_alphanum(ax)
 
     # --- Headroom for labels
@@ -1316,3 +1318,328 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             hatch_map=HATCH_MAP,
             width_by_std=True,
         )
+
+
+def stacked_mean_relmae_per_model(
+    df_en_tidy,
+    df_rf_tidy,
+    out_png,
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
+    min_rel_delta_mae=0.001,
+    top_k=None,  # optional: keep top-K features by total across both models
+    show_legend=True,
+    data_dir=DATA_DIR,  # to read *_fold_metrics.csv
+    width_by_std=False,  # <<< NEW: encode segment width from std
+    std_quantiles=(5, 95),  # <<< NEW: robust range for width mapping
+    base_width=0.65,  # width when width_by_std=False
+):
+    """
+    Two-bar stacked plot (EN, RF). Each stack level is the MEAN relative feature
+    importance across participants for that model (positives only, thresholded).
+
+    On top of each model bar:
+      - R²=<mean of per-participant mean R² over folds> (red if negative)
+      - p=<#participants>
+
+    If width_by_std=True:
+      - For each model & feature, compute a robust std summary: median(delta_mae_std across participants)
+      - Pool both models’ feature-stds to get robust (q_lo, q_hi) via _std_widths_setup
+      - Map std -> width with std_to_width
+    """
+
+    # ---- helpers ----
+    def _per_model_feature_means_and_pids(df_tidy, min_thr):
+        if df_tidy.empty:
+            return pd.Series(dtype=float), [], pd.DataFrame()
+        pids = list(dict.fromkeys(df_tidy["pid"].astype(str).tolist()))
+        df = df_tidy[df_tidy["rel_delta_mae"] > min_thr].copy()
+        if df.empty:
+            return pd.Series(dtype=float), pids, pd.DataFrame()
+        g = (
+            df.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
+            .mean()
+            .rename(columns={"rel_delta_mae": "rel_pos"})
+        )
+        g["rel_pos"] = g["rel_pos"].clip(lower=0.0)
+        piv = g.pivot_table(
+            index="feature", columns="pid", values="rel_pos", aggfunc="sum"
+        ).fillna(0.0)
+        f_means = piv.mean(axis=1)
+        return f_means, pids, df  # return filtered df for std summaries
+
+    def _per_model_feature_std_robust(df_filtered):
+        """
+        Return Series: feature -> robust std summary (median over participants).
+        df_filtered must contain columns: feature, pid, delta_mae_std (after thresholding rel_delta_mae).
+        """
+        if df_filtered.empty or "delta_mae_std" not in df_filtered.columns:
+            return pd.Series(dtype=float)
+        s = (
+            df_filtered.groupby(["feature", "pid"], as_index=False)["delta_mae_std"]
+            .median()
+            .pivot_table(
+                index="feature", columns="pid", values="delta_mae_std", aggfunc="mean"
+            )
+            .median(axis=1)  # robust across participants
+        )
+        return s
+
+    # ---- compute per-model feature means (and keep filtered df for std) ----
+    en_means, en_pids, en_df_filt = _per_model_feature_means_and_pids(
+        df_en_tidy, min_rel_delta_mae
+    )
+    rf_means, rf_pids, rf_df_filt = _per_model_feature_means_and_pids(
+        df_rf_tidy, min_rel_delta_mae
+    )
+
+    # Union of features present in either model
+    features_all = sorted(set(en_means.index).union(set(rf_means.index)))
+
+    # ---- optional top-K by total across both models ----
+    if top_k is not None and top_k > 0 and len(features_all) > top_k:
+        totals = pd.Series(
+            {f: en_means.get(f, 0.0) + rf_means.get(f, 0.0) for f in features_all}
+        )
+        features_keep = totals.sort_values(ascending=False).head(top_k).index.tolist()
+    else:
+        features_keep = features_all
+
+    # ---- stacking order ----
+    if style_order:
+        plot_features = [f for f in style_order if f in features_keep]
+        remaining = [f for f in features_keep if f not in plot_features]
+        if remaining:
+            rem_sorted = sorted(
+                remaining,
+                key=lambda f: en_means.get(f, 0.0) + rf_means.get(f, 0.0),
+                reverse=True,
+            )
+            plot_features.extend(rem_sorted)
+    else:
+        plot_features = sorted(
+            features_keep,
+            key=lambda f: en_means.get(f, 0.0) + rf_means.get(f, 0.0),
+            reverse=True,
+        )
+
+    # ---- heights per feature for EN/RF ----
+    en_heights = np.array([float(en_means.get(f, 0.0)) for f in plot_features])
+    rf_heights = np.array([float(rf_means.get(f, 0.0)) for f in plot_features])
+
+    # ---- optional std-based widths (robust) ----
+    if width_by_std:
+        en_std = (
+            _per_model_feature_std_robust(en_df_filt).reindex(plot_features).fillna(0.0)
+        )
+        rf_std = (
+            _per_model_feature_std_robust(rf_df_filt).reindex(plot_features).fillna(0.0)
+        )
+        # Build a pseudo-pivot with two columns to leverage your existing helper
+        std_piv_like = pd.DataFrame(
+            {"EN": en_std.values, "RF": rf_std.values}, index=plot_features
+        )
+        s_lo, s_hi = _std_widths_setup(
+            std_piv_like, q_lo=std_quantiles[0], q_hi=std_quantiles[1]
+        )
+        # Map to widths per model per feature
+        en_widths = std_to_width(en_std.values, s_lo, s_hi)
+        rf_widths = std_to_width(rf_std.values, s_lo, s_hi)
+    else:
+        en_widths = np.full(len(plot_features), base_width, dtype=float)
+        rf_widths = np.full(len(plot_features), base_width, dtype=float)
+
+    # ---- positions and figure ----
+    x = np.array([0, 1])  # positions: EN, RF
+    fig, ax = plt.subplots(figsize=(6.5, max(4.5, 0.35 * max(1, len(plot_features)))))
+
+    # shared styles
+    style_order_eff = style_order or plot_features
+    cmap = color_map or {}
+    hmap = hatch_map or {}
+
+    bottoms_en = 0.0
+    bottoms_rf = 0.0
+    bars_for_legend = []
+
+    # Plot segments in consistent feature order
+    for i, feat in enumerate(style_order_eff):
+        if feat not in plot_features:
+            continue
+        h_en = en_heights[plot_features.index(feat)]
+        h_rf = rf_heights[plot_features.index(feat)]
+        w_en = en_widths[plot_features.index(feat)]
+        w_rf = rf_widths[plot_features.index(feat)]
+
+        # EN segment
+        be = ax.bar(
+            x[0],
+            h_en,
+            width=w_en,
+            bottom=bottoms_en,
+            color=cmap.get(feat, "#cccccc"),
+            edgecolor="black",
+            hatch=hmap.get(feat, ""),
+            label=feat,  # legend handle
+        )
+        # RF segment
+        br = ax.bar(
+            x[1],
+            h_rf,
+            width=w_rf,
+            bottom=bottoms_rf,
+            color=cmap.get(feat, "#cccccc"),
+            edgecolor="black",
+            hatch=hmap.get(feat, ""),
+        )
+
+        if h_en > 0 or h_rf > 0:
+            bars_for_legend.append((feat, be[0]))
+
+        bottoms_en += h_en
+        bottoms_rf += h_rf
+
+    # ---- Annotations on top: mean R² (red if negative) and p=<participants> ----
+    def _mean_r2_over_participants(model_tag, pids, data_dir):
+        r2_means = []
+        for pid in pids:
+            m = load_fold_metrics(pid, model_tag, data_dir)
+            if not m:
+                continue
+            r2_vals = [v.get("r2") for v in m.values() if v.get("r2") is not None]
+            if r2_vals:
+                r2_means.append(float(np.mean(r2_vals)))
+        mean_r2 = float(np.mean(r2_means)) if r2_means else None
+        return mean_r2, len(pids)
+
+    en_mean_r2, en_p = _mean_r2_over_participants("EN", en_pids, data_dir)
+    rf_mean_r2, rf_p = _mean_r2_over_participants("RF", rf_pids, data_dir)
+
+    totals = [bottoms_en, bottoms_rf]
+    ymax = max(totals) if totals else 0.0
+    if not (np.isfinite(ymax) and ymax > 0):
+        ymax = 1.0
+    offset = 0.05 * ymax
+    line_gap = 0.04 * ymax
+
+    # EN label
+    y0 = totals[0]
+    if en_mean_r2 is not None and np.isfinite(en_mean_r2):
+        ax.text(
+            x[0],
+            y0 + offset + line_gap,
+            rf"$\overline{{R^2}}$={en_mean_r2:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=("red" if en_mean_r2 < 0 else "black"),
+        )
+    ax.text(
+        x[0],
+        y0 + offset,
+        f"p={en_p}",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="black",
+    )
+
+    # RF label
+    y1 = totals[1]
+    if rf_mean_r2 is not None and np.isfinite(rf_mean_r2):
+        ax.text(
+            x[1],
+            y1 + offset + line_gap,
+            rf"$\overline{{R^2}}$={rf_mean_r2:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=("red" if rf_mean_r2 < 0 else "black"),
+        )
+    ax.text(
+        x[1],
+        y1 + offset,
+        f"p={rf_p}",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="black",
+    )
+
+    # ---- Axes & legend ----
+    ax.set_xticks(x)
+    ax.set_xticklabels(["EN", "RF"])
+    ax.set_ylabel("Relative feature importance")  # concise label, no title
+
+    if show_legend and bars_for_legend:
+        seen = set()
+        handles, labels = [], []
+        for feat, handle in bars_for_legend:
+            if feat not in seen:
+                seen.add(feat)
+                labels.append(feat)
+                handles.append(handle)
+        ax.legend(
+            handles,
+            labels,
+            title="Feature Group",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+        )
+        sort_legend_alphanum(ax)
+
+    # headroom for annotations
+    ax.set_ylim(0, ymax * 1.35)
+
+    fig.tight_layout()
+    add_logo_to_figure(fig)
+    os.makedirs(os.path.dirname(out_png), exist_ok=True)
+    fig.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_png}")
+
+
+# ----- TWO-BAR (EN vs RF) STACKED MEAN FEATURE IMPORTANCE -----
+# Requires: df_en, df_rf, STYLE_ORDER, COLOR_MAP, HATCH_MAP, DATA_DIR, outputs
+# (All already present in your script.)
+
+# 1) Fixed-width version
+out_mean_fixed = os.path.join(
+    DATA_DIR, "EN_RF_mean_pos_relmae_greater_0.001_stacked_fixed.png"
+)
+stacked_mean_relmae_per_model(
+    df_en_tidy=df_en,
+    df_rf_tidy=df_rf,
+    out_png=out_mean_fixed,
+    style_order=STYLE_ORDER,
+    color_map=COLOR_MAP,
+    hatch_map=HATCH_MAP,
+    min_rel_delta_mae=0.001,
+    top_k=12,  # optional: keep top K features overall
+    show_legend=True,
+    data_dir=DATA_DIR,
+    width_by_std=False,  # fixed-width segments
+)
+outputs.append(out_mean_fixed)
+
+# 2) Std-encoded widths (robust, 5–95% quantiles)
+out_mean_std = os.path.join(
+    DATA_DIR, "EN_RF_mean_pos_relmae_greater_0.001_stacked_stdwidths.png"
+)
+stacked_mean_relmae_per_model(
+    df_en_tidy=df_en,
+    df_rf_tidy=df_rf,
+    out_png=out_mean_std,
+    style_order=STYLE_ORDER,
+    color_map=COLOR_MAP,
+    hatch_map=HATCH_MAP,
+    min_rel_delta_mae=0.001,
+    top_k=12,
+    show_legend=True,
+    data_dir=DATA_DIR,
+    width_by_std=True,  # <<< enable robust std-based widths
+    std_quantiles=(5, 95),  # robust range for width mapping
+    base_width=0.65,  # used only if width_by_std=False
+)
+outputs.append(out_mean_std)

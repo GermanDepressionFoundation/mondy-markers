@@ -10,6 +10,8 @@ from matplotlib import cm
 from matplotlib.colors import Normalize, to_rgb
 from matplotlib.patches import Patch
 
+from utils import PSEUDONYM_TO_LETTER, add_logo_to_figure
+
 DATA_DIR = "results_dummycomparison_timeaware_5050_split_v10"
 
 # ===== Prefix-aware, consistent styles =====
@@ -134,6 +136,47 @@ def sort_legend_alphanum(ax):
     )
 
 
+def load_fold_metrics(pid, model_tag, data_dir=DATA_DIR):
+    """
+    Load <pid>_<model>_fold_metrics.csv and return:
+      { str(fold): {"r2": float|None, "n_test_samples": int|None} }
+    """
+    path = os.path.join(data_dir, f"{pid}_{model_tag}_fold_metrics.csv")
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"Skipping fold metrics for {pid} {model_tag}: {e}")
+        return {}
+
+    if "fold" not in df.columns or "r2" not in df.columns:
+        print(f"Fold metrics missing required columns in {path}: {list(df.columns)}")
+        return {}
+
+    df["fold"] = df["fold"].astype(str)
+    df["r2"] = pd.to_numeric(df["r2"], errors="coerce")
+
+    # robust detection of n_test_samples
+    n_col = None
+    for cand in ["n_test_samples", "n_test", "n_test_days"]:
+        if cand in df.columns:
+            n_col = cand
+            df[n_col] = pd.to_numeric(df[n_col], errors="coerce")
+            break
+
+    out = {}
+    for _, row in df.iterrows():
+        out[row["fold"]] = {
+            "r2": float(row["r2"]) if pd.notna(row["r2"]) else None,
+            "n_test_samples": (
+                int(row[n_col]) if n_col and pd.notna(row[n_col]) else None
+            ),
+        }
+    return out
+
+
 def extract_pid(path):
     """
     Extract pid from either:
@@ -176,16 +219,17 @@ def load_model_files(model_tag, data_dir=DATA_DIR):
         )
         rel_mae_col = "rel_delta_MAE"
         delta_mae_std_col = "delta_MAE_std"
+        rel_R2_col = "rel_delta_R2"
 
         pid = extract_pid(fp)
-        tmp = df[[feature_col, rel_mae_col, delta_mae_std_col]].copy()
-        tmp.columns = ["feature", "rel_delta_mae", "delta_mae_std"]
+        tmp = df[[feature_col, rel_mae_col, delta_mae_std_col, rel_R2_col]].copy()
+        tmp.columns = ["feature", "rel_delta_mae", "delta_mae_std", "rel_delta_R2"]
         tmp["pid"] = pid
         records.append(tmp)
 
     if not records:
         return pd.DataFrame(
-            columns=["feature", "rel_delta_mae", "delta_mae_std", "pid"]
+            columns=["feature", "rel_delta_mae", "delta_mae_std", "rel_delta_R2", "pid"]
         )
     return pd.concat(records, ignore_index=True)
 
@@ -446,254 +490,277 @@ def plot_categorical_grid(df_tidy, model_tag, out_png, feature_order=None):
     print(f"Saved: {out_png}")
 
 
-def stacked_positive_relmae(
-    df_tidy,
-    model_tag,
-    out_png,
-    feature_order=None,  # pass shared order to align EN/RF
-    top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
-    label_totals=True,  # print total per bar on top
-    sort_participants_by_total=True,  # sort participants by total height
-    style_order=None,
-    color_map=None,
-    hatch_map=None,
-):
+def _std_widths_setup(std_piv, w_min=0.35, w_max=0.90, q_lo=5, q_hi=95):
     """
-    Stacked bar plot per participant with only positive relative MAE contributions.
-    - Aggregates median rel_delta_mae per (feature, pid)
-    - Clips negatives to zero
-    - No normalization (keeps absolute comparability)
-    - Labels total per participant
+    Given a pivot of std values (index x columns), compute robust
+    global quantiles for mapping std -> bar width.
+    Returns (s_lo, s_hi) for std_to_width.
     """
-    if df_tidy.empty:
-        print(f"No data for {model_tag}; skipping stacked bar.")
-        return
-
-    # 1) Aggregate to median per (feature, pid), clip to positive
-    agg = (
-        df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
-        .mean()
-        .rename(columns={"rel_delta_mae": "rel_pos"})
-    )
-    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
-
-    # 2) Pivot to features x participants (sum in case multiple rows remain)
-    pivot = agg.pivot_table(
-        index="feature", columns="pid", values="rel_pos", aggfunc="sum"
-    ).fillna(0.0)
-
-    # 3) Optional: reduce to top-K features (by total positive contribution)
-    if top_k is not None and top_k < pivot.shape[0]:
-        totals_feat = pivot.sum(axis=1)
-        keep = totals_feat.sort_values(ascending=False).head(top_k).index
-        pivot = pivot.loc[keep]
-
-    # 4) Enforce feature order if provided; else order by total contribution
-    if feature_order is not None:
-        available = [f for f in feature_order if f in pivot.index]
-        pivot = pivot.reindex(available)
-    else:
-        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
-
-    # 5) Optionally sort participants by total bar height (descending)
-    totals_pid = pivot.sum(axis=0)
-    if sort_participants_by_total:
-        pivot = pivot.loc[:, totals_pid.sort_values(ascending=False).index]
-        totals_pid = pivot.sum(axis=0)
-
-    # 7) Plot
-    pids = pivot.columns.tolist()
-    features = pivot.index.tolist()
-    x = np.arange(len(pids))
-
-    fig, ax = plt.subplots(
-        figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
-    )
-
-    # --- Use shared styles ---
-    style_order = style_order or STYLE_ORDER
-    color_map = color_map or COLOR_MAP
-    hatch_map = hatch_map or HATCH_MAP
-
-    # Plot features in the canonical style order, filtered to what's present
-    plot_features = [f for f in style_order if f in features]
-
-    bottoms = np.zeros(len(pids))
-    bars_by_feat = {}
-    for feat in plot_features:
-        heights = pivot.loc[feat].values
-        bars = ax.bar(
-            x,
-            heights,
-            bottom=bottoms,
-            label=feat,
-            color=color_map.get(feat, "#cccccc"),
-            edgecolor="black",
-            hatch=hatch_map.get(feat, ""),
-        )
-        bars_by_feat[feat] = bars
-        bottoms += heights
-
-    # 8) Label totals on top (if any non-zero)
-    if label_totals:
-        for xi, total in zip(x, totals_pid.values):
-            if total > 0:
-                ax.text(xi, total, f"{total:.2f}", ha="center", va="bottom", fontsize=9)
-
-    # Axes and labels
-    ax.set_xticks(x)
-    ax.set_xticklabels(pids, rotation=45, ha="right")
-    ax.set_xlabel("Participant (pid)")
-    ax.set_ylabel("Relative feature importance (sum of positives)")
-    ax.set_title(
-        f"{model_tag}: Stacked positive relative feature importance per participant"
-    )
-
-    # Legend outside for readability
-    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
-    sort_legend_alphanum(ax)
-
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved: {out_png}")
-
-
-def stacked_positive_relmae_with_std(
-    df_tidy,
-    model_tag,
-    out_png,
-    feature_order=None,  # pass shared order to align EN/RF
-    top_k=None,  # e.g., 12 features to keep plot readable (by total positive contribution)
-    label_totals=True,  # print total per bar on top
-    sort_participants_by_total=True,  # sort participants by total height
-    style_order=None,
-    color_map=None,
-    hatch_map=None,
-):
-    """
-    Stacked bar plot per participant with only positive relative MAE contributions.
-    - Aggregates median rel_delta_mae per (feature, pid)
-    - Clips negatives to zero
-    - No normalization (keeps absolute comparability)
-    - Labels total per participant
-    """
-    if df_tidy.empty:
-        print(f"No data for {model_tag}; skipping stacked bar.")
-        return
-
-    # 1) Aggregate to median per (feature, pid), clip to positive
-    agg = (
-        df_tidy.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
-        .mean()
-        .rename(columns={"rel_delta_mae": "rel_pos"})
-    )
-    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
-
-    # 2) Pivot to features x participants (sum in case multiple rows remain)
-    pivot = agg.pivot_table(
-        index="feature", columns="pid", values="rel_pos", aggfunc="sum"
-    ).fillna(0.0)
-
-    # --- NEW: std per (feature, fold) and pivot to align with `piv`
-    std_agg = (
-        df_tidy.groupby(["feature", "pid"], as_index=False)["delta_mae_std"]
-        .median()  # or .mean(), whichever matches your intent
-        .rename(columns={"delta_mae_std": "std_val"})
-    )
-
-    std_piv = std_agg.pivot_table(
-        index="feature", columns="pid", values="std_val", aggfunc="mean"
-    ).fillna(0.0)
-
-    # Robust global normalization for std -> width mapping
     std_all = std_piv.values.ravel()
     std_all = std_all[np.isfinite(std_all)]
     if len(std_all) == 0:
         s_lo, s_hi = 0.0, 1.0
     else:
-        # 5–95% robust range to avoid outliers dominating
-        s_lo, s_hi = np.percentile(std_all, [5, 95])
+        s_lo, s_hi = np.percentile(std_all, [q_lo, q_hi])
         if s_hi <= s_lo:
-            s_hi = s_lo + 1e-12  # avoid divide by zero
+            s_hi = s_lo + 1e-12
+    return s_lo, s_hi
 
-    # 3) Optional: reduce to top-K features (by total positive contribution)
+
+def _mean_r2_and_nfolds(pid, model_tag, data_dir=DATA_DIR):
+    """
+    Compute mean R² over folds and number of folds for a participant
+    using <pid>_<model_tag>_fold_metrics.csv via your existing loader.
+    Returns (mean_r2_or_None, n_folds_int_or_None).
+    """
+    import numpy as np
+
+    metrics = load_fold_metrics(
+        pid, model_tag, data_dir
+    )  # existing helper in your file
+    if not metrics:
+        return None, None
+    r2_vals = [m.get("r2") for m in metrics.values() if m.get("r2") is not None]
+    mean_r2 = float(np.mean(r2_vals)) if r2_vals else None
+    n_folds = len(metrics) if metrics else None
+    return mean_r2, n_folds
+
+
+def across_participants_stacked_positive_relmae(
+    df_tidy,
+    model_tag,
+    out_png,
+    feature_order=None,
+    top_k=None,
+    label_totals=True,
+    sort_participants_by_total=True,
+    style_order=None,
+    color_map=None,
+    hatch_map=None,
+    width_by_std=False,
+    std_quantiles=(5, 95),
+    min_rel_delta_mae=0.001,  # ignore negligible contributions
+    pseudonym_to_letter=None,  # NEW: optional mapping {pseudonym -> letter}
+):
+    """
+    Stacked bar plot per participant (pid) with only positive relative MAE contributions.
+
+    Features:
+      - Filters out rel_delta_mae ≤ min_rel_delta_mae
+      - Keeps all participants (even with no visible bars)
+      - Optionally uses bar width to reflect std
+      - Displays mean R² and fold count (from *_fold_metrics)
+      - Optionally replaces pseudonyms on x-axis via pseudonym_to_letter
+    """
+
+    if df_tidy.empty:
+        print(f"No data for {model_tag}; skipping stacked bar.")
+        return
+
+    # --- Remember all participants before filtering
+    all_pids = df_tidy["pid"].astype(str).tolist()
+    all_pids = list(dict.fromkeys(all_pids))  # unique, stable order
+
+    # --- Apply threshold
+    df_filt = df_tidy[df_tidy["rel_delta_mae"] > min_rel_delta_mae].copy()
+
+    # --- Aggregate mean per (feature, pid)
+    if not df_filt.empty:
+        agg = (
+            df_filt.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
+            .mean()
+            .rename(columns={"rel_delta_mae": "rel_pos"})
+        )
+        agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
+        pivot = agg.pivot_table(
+            index="feature", columns="pid", values="rel_pos", aggfunc="sum"
+        )
+    else:
+        pivot = pd.DataFrame(
+            index=pd.Index([], name="feature"), columns=pd.Index([], name="pid")
+        )
+
+    pivot = pivot.fillna(0.0)
+
+    # --- Std pivot for widths (if enabled)
+    if width_by_std:
+        if not df_filt.empty and "delta_mae_std" in df_filt.columns:
+            std_agg = (
+                df_filt.groupby(["feature", "pid"], as_index=False)["delta_mae_std"]
+                .median()
+                .rename(columns={"delta_mae_std": "std_val"})
+            )
+            std_piv = std_agg.pivot_table(
+                index="feature", columns="pid", values="std_val", aggfunc="mean"
+            ).fillna(0.0)
+        else:
+            std_piv = pd.DataFrame(
+                index=pivot.index.copy(), columns=pd.Index([], name="pid")
+            ).fillna(0.0)
+
+    # --- Ensure all participants exist as columns
+    for pid in all_pids:
+        if pid not in pivot.columns:
+            pivot[pid] = 0.0
+        if width_by_std and pid not in std_piv.columns:
+            std_piv[pid] = 0.0
+
+    pivot = pivot[all_pids]
+    if width_by_std:
+        std_piv = std_piv[all_pids]
+
+    # --- Top-K features
     if top_k is not None and top_k < pivot.shape[0]:
-        totals_feat = pivot.sum(axis=1)
-        keep = totals_feat.sort_values(ascending=False).head(top_k).index
+        keep = pivot.sum(axis=1).sort_values(ascending=False).head(top_k).index
         pivot = pivot.loc[keep]
+        if width_by_std:
+            std_piv = std_piv.loc[keep]
 
-    # 4) Enforce feature order if provided; else order by total contribution
+    # --- Feature order
     if feature_order is not None:
         available = [f for f in feature_order if f in pivot.index]
         pivot = pivot.reindex(available)
+        if width_by_std:
+            std_piv = std_piv.reindex(available)
     else:
         pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+        if width_by_std:
+            std_piv = std_piv.loc[pivot.index]
 
-    # 5) Optionally sort participants by total bar height (descending)
+    # --- Sort participants by total contribution (if not all zeros)
     totals_pid = pivot.sum(axis=0)
-    if sort_participants_by_total:
-        pivot = pivot.loc[:, totals_pid.sort_values(ascending=False).index]
+    if sort_participants_by_total and not np.allclose(
+        totals_pid.values, totals_pid.values[0]
+    ):
+        order = totals_pid.sort_values(ascending=False).index.tolist()
+        pivot = pivot[order]
+        if width_by_std:
+            std_piv = std_piv[order]
         totals_pid = pivot.sum(axis=0)
 
-    # 7) Plot
+    # --- Width mapping for std (if used)
+    if width_by_std:
+        s_lo, s_hi = _std_widths_setup(
+            std_piv, q_lo=std_quantiles[0], q_hi=std_quantiles[1]
+        )
+
+    # --- Plot
     pids = pivot.columns.tolist()
     features = pivot.index.tolist()
     x = np.arange(len(pids))
 
     fig, ax = plt.subplots(
-        figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * len(features)))
+        figsize=(max(8, 0.6 * len(pids)), max(5, 0.35 * max(1, len(features))))
     )
 
-    # --- Use shared styles ---
     style_order = style_order or STYLE_ORDER
     color_map = color_map or COLOR_MAP
     hatch_map = hatch_map or HATCH_MAP
-
     plot_features = [f for f in style_order if f in features]
 
     bottoms = np.zeros(len(pids))
-    bars_by_feat = {}
-    for feat in plot_features:
-        heights = pivot.loc[feat].values
-        std_vals = (
-            std_piv.loc[feat].values
-            if feat in std_piv.index
-            else np.zeros_like(heights)
-        )
-        std_vals = np.where(heights > 0, std_vals, 0.0)
-        widths = std_to_width(std_vals, s_lo, s_hi)
-        bars = ax.bar(
-            x,
-            heights,
-            width=widths,
-            bottom=bottoms,
-            label=feat,
-            color=color_map.get(feat, "#cccccc"),
-            edgecolor="black",
-            hatch=hatch_map.get(feat, ""),
-        )
-        bars_by_feat[feat] = bars
-        bottoms += heights
+    if plot_features:
+        for feat in plot_features:
+            heights = pivot.loc[feat].values
+            if width_by_std:
+                std_vals = std_piv.loc[feat].values
+                std_vals = np.where(heights > 0, std_vals, 0.0)
+                widths = std_to_width(std_vals, s_lo, s_hi)
+            else:
+                widths = 0.8
 
-    # 8) Label totals on top (if any non-zero)
+            ax.bar(
+                x,
+                heights,
+                bottom=bottoms,
+                width=widths,
+                label=feat,
+                color=color_map.get(feat, "#cccccc"),
+                edgecolor="black",
+                hatch=hatch_map.get(feat, ""),
+            )
+            bottoms += heights
+    else:
+        ax.bar(x, np.zeros(len(pids)), width=0.6, color="none", edgecolor="none")
+
+    # --- Annotations: mean R² and fold count
     if label_totals:
-        for xi, total in zip(x, totals_pid.values):
-            if total > 0:
-                ax.text(xi, total, f"{total:.2f}", ha="center", va="bottom", fontsize=9)
+        r2_nf_by_pid = {
+            pid: _mean_r2_and_nfolds(pid, model_tag, DATA_DIR) for pid in pids
+        }
 
-    # Axes and labels
-    ax.set_xticks(x)
-    ax.set_xticklabels(pids, rotation=45, ha="right")
-    ax.set_xlabel("Participant (pid)")
-    ax.set_ylabel("Relative feature importance (sum of positives)")
-    ax.set_title(
-        f"{model_tag}: Stacked positive relative feature importance per participant"
+        ymax = totals_pid.max() if len(totals_pid) else 0.0
+        offset = 0.03 * ymax if (np.isfinite(ymax) and ymax > 0) else 0.03
+        line_gap = 0.04 * ymax if (np.isfinite(ymax) and ymax > 0) else 0.04
+
+        for xi, pid in enumerate(pids):
+            total = totals_pid.loc[pid]
+            mean_r2, n_folds = r2_nf_by_pid.get(pid, (None, None))
+            y_base = total if (np.isfinite(total) and total > 0) else 0.0
+
+            # R² (red if negative)
+            if mean_r2 is not None and np.isfinite(mean_r2):
+                r2_color = "red" if mean_r2 < 0 else "black"
+                ax.text(
+                    xi,
+                    y_base + offset + line_gap,
+                    f"R²={mean_r2:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6,
+                    color=r2_color,
+                )
+            # f=<n_folds>
+            if n_folds is not None:
+                ax.text(
+                    xi,
+                    y_base + offset,
+                    f"f={n_folds}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6,
+                    color="black",
+                )
+
+    # --- X-axis labels: letters or pseudonyms
+    if pseudonym_to_letter is not None:
+        # Create letter labels
+        x_labels = [pseudonym_to_letter.get(pid, pid) for pid in pids]
+
+        # Sort alphanumerically by letters
+        sort_order = np.argsort(x_labels)
+        # Reorder everything (pivot columns, totals, and arrays)
+        pivot = pivot.iloc[:, sort_order]
+        if width_by_std:
+            std_piv = std_piv.iloc[:, sort_order]
+        pids = [pids[i] for i in sort_order]
+        x_labels = [x_labels[i] for i in sort_order]
+        totals_pid = totals_pid[pids]
+        ax.set_xticklabels(x_labels)
+    else:
+        # Default labels: just use pseudonyms, no re-sorting
+        x_labels = pids
+        ax.set_xticklabels(x_labels, rotation=45, ha="right")
+
+    # --- Apply labels to x-axis
+    ax.set_xticks(np.arange(len(pids)))
+
+    ax.set_xlabel(
+        "Participant (pid)"
+        if pseudonym_to_letter is None
+        else "Participant (anonymized)"
     )
+    ax.set_ylabel("Relative feature importance")
 
-    # Legend outside for readability
-    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
-    sort_legend_alphanum(ax)
+    if plot_features:
+        ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1)
+        sort_legend_alphanum(ax)
+
+    # --- Headroom for labels
+    ymax = totals_pid.max() if len(totals_pid) else 0.0
+    if not (np.isfinite(ymax) and ymax > 0):
+        ymax = 1.0
+    ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -740,8 +807,10 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
     outputs.append(out)
 
 for model, df in [("EN", df_en), ("RF", df_rf)]:
-    out = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_stacked_barplot.png")
-    stacked_positive_relmae(
+    out = os.path.join(
+        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot.png"
+    )
+    across_participants_stacked_positive_relmae(
         df_tidy=df,
         model_tag=model,
         out_png=out,
@@ -752,11 +821,15 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         style_order=STYLE_ORDER,
         color_map=COLOR_MAP,
         hatch_map=HATCH_MAP,
+        width_by_std=False,
+        min_rel_delta_mae=0.001,
     )
     outputs.append(out)
 
-    out = os.path.join(DATA_DIR, f"{model}_rel_delta_mae_stacked_barplot_std.png")
-    stacked_positive_relmae_with_std(
+    out = os.path.join(
+        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot_std.png"
+    )
+    across_participants_stacked_positive_relmae(
         df_tidy=df,
         model_tag=model,
         out_png=out,
@@ -767,53 +840,35 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         style_order=STYLE_ORDER,
         color_map=COLOR_MAP,
         hatch_map=HATCH_MAP,
+        width_by_std=True,
+        min_rel_delta_mae=0.001,
+    )
+    outputs.append(out)
+
+    out = os.path.join(
+        DATA_DIR,
+        f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot_std_with_letters.png",
+    )
+    across_participants_stacked_positive_relmae(
+        df_tidy=df,
+        model_tag=model,
+        out_png=out,
+        feature_order=shared_order,
+        top_k=12,
+        label_totals=True,
+        sort_participants_by_total=False,
+        style_order=STYLE_ORDER,
+        color_map=COLOR_MAP,
+        hatch_map=HATCH_MAP,
+        width_by_std=True,
+        min_rel_delta_mae=0.001,
+        pseudonym_to_letter=PSEUDONYM_TO_LETTER,
     )
     outputs.append(out)
 
 print(outputs)
 
 # ====================== PER-PARTICIPANT, PER-FOLD PLOTS ======================
-
-
-def load_fold_metrics(pid, model_tag, data_dir=DATA_DIR):
-    """
-    Load <pid>_<model>_fold_metrics.csv and return:
-      { str(fold): {"r2": float|None, "n_test_samples": int|None} }
-    """
-    path = os.path.join(data_dir, f"{pid}_{model_tag}_fold_metrics.csv")
-    if not os.path.exists(path):
-        return {}
-
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        print(f"Skipping fold metrics for {pid} {model_tag}: {e}")
-        return {}
-
-    if "fold" not in df.columns or "r2" not in df.columns:
-        print(f"Fold metrics missing required columns in {path}: {list(df.columns)}")
-        return {}
-
-    df["fold"] = df["fold"].astype(str)
-    df["r2"] = pd.to_numeric(df["r2"], errors="coerce")
-
-    # robust detection of n_test_samples
-    n_col = None
-    for cand in ["n_test_samples", "n_test", "n_test_days"]:
-        if cand in df.columns:
-            n_col = cand
-            df[n_col] = pd.to_numeric(df[n_col], errors="coerce")
-            break
-
-    out = {}
-    for _, row in df.iterrows():
-        out[row["fold"]] = {
-            "r2": float(row["r2"]) if pd.notna(row["r2"]) else None,
-            "n_test_samples": (
-                int(row[n_col]) if n_col and pd.notna(row[n_col]) else None
-            ),
-        }
-    return out
 
 
 def load_per_fold_file(model_tag, data_dir=DATA_DIR):
@@ -1008,280 +1063,198 @@ def per_participant_stacked_positive(
     style_order=None,
     color_map=None,
     hatch_map=None,
+    width_by_std=False,  # optional std-based segment widths
+    std_quantiles=(5, 95),
+    min_rel_delta_mae=0.001,  # <<< NEW: threshold
 ):
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
-    Absolute scale (no normalization). Totals labeled.
-    Now also annotates each bar with the fold R² from <pid>_<model>_fold_metrics.csv.
+    Enhancements:
+      - Filters out rel_delta_mae ≤ min_rel_delta_mae before aggregation
+      - Ensures all folds are on x-axis, even if nothing passes threshold
+      - Optional std-based widths (delta_mae_std)
+      - Annotates each bar with R² (red if negative) and n (samples)
+      - No figure title; y-label shortened to 'Relative feature importance'
     """
     if df_pid.empty:
         return
 
-    # median per (feature, fold), clip negatives
-    agg = (
-        df_pid.groupby(["feature", "fold"], as_index=False)["rel_delta_mae"]
-        .median()
-        .rename(columns={"rel_delta_mae": "rel_pos"})
-    )
-    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
-
-    # pivot: features x folds
-    piv = agg.pivot_table(
-        index="feature", columns="fold", values="rel_pos", aggfunc="sum"
-    ).fillna(0.0)
-
-    # order folds (use your helper) and ensure all exist
+    # --- Keep full fold order from the raw df (before filtering)
     fold_order = _order_folds(df_pid)
-    for f in fold_order:
-        if f not in piv.columns:
-            piv[f] = 0.0
-    piv = piv[fold_order]
 
-    # top-k features (by total positive)
-    if top_k is not None and top_k < piv.shape[0]:
-        totals_feat = piv.sum(axis=1)
-        keep = totals_feat.sort_values(ascending=False).head(top_k).index
-        piv = piv.loc[keep]
+    # --- Filter tiny effects
+    df_filt = df_pid[df_pid["rel_delta_mae"] > min_rel_delta_mae].copy()
 
-    # feature order by total positive
-    piv = piv.loc[piv.sum(axis=1).sort_values(ascending=False).index]
-
-    # totals per fold
-    totals_fold = piv.sum(axis=0)
-
-    # --- NEW: load fold-level R² and align to fold_order
-    metrics_map = load_fold_metrics(pid, model_tag, DATA_DIR)
-    # keys as strings for robust matching
-    r2_per_fold = [metrics_map.get(str(f), None) for f in fold_order]
-
-    x = np.arange(len(fold_order))
-    features = piv.index.tolist()
-    fig, ax = plt.subplots(
-        figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * len(features)))
-    )
-
-    style_order = style_order or STYLE_ORDER
-    color_map = color_map or COLOR_MAP
-    hatch_map = hatch_map or HATCH_MAP
-
-    plot_features = [f for f in style_order if f in features]
-
-    bottoms = np.zeros(len(fold_order))
-    for feat in plot_features:
-        heights = piv.loc[feat].values
-        ax.bar(
-            x,
-            heights,
-            bottom=bottoms,
-            label=feat,
-            color=color_map.get(feat, "#cccccc"),
-            edgecolor="black",
-            hatch=hatch_map.get(feat, ""),
+    # --- Aggregate positives (median across rows per feature, fold)
+    if not df_filt.empty:
+        agg = (
+            df_filt.groupby(["feature", "fold"], as_index=False)["rel_delta_mae"]
+            .median()
+            .rename(columns={"rel_delta_mae": "rel_pos"})
         )
-        bottoms += heights
+        agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
 
-    if label_totals:
-        ymax = totals_fold.max() if len(totals_fold) else 0.0
-        offset = 0.02 * ymax if ymax > 0 else 0.02
-        for xi, f in enumerate(fold_order):
-            total = totals_fold.loc[f]
-            m = metrics_map.get(str(f), {})
-            r2_val = m.get("r2")
-            n_test = m.get("n_test_samples")
-
-            # Build multi-line label
-            lines = []
-            if r2_val is not None:
-                lines.append(f"R²={r2_val:.2f}")
-            if n_test is not None:
-                lines.append(f"n={int(n_test)}")
-
-            label = "\n".join(lines)
-            if label:
-                ax.text(
-                    xi,
-                    total + offset,
-                    label,
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                    linespacing=1.1,
-                )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(fold_order, rotation=45, ha="right")
-    ax.set_xlabel("Fold")
-    ax.set_ylabel("Relative feature importance (sum of positives)")
-    ax.set_title(
-        f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
-    )
-    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
-    sort_legend_alphanum(ax)
-    # Add top margin for annotations (extra headroom)
-    ymax = totals_fold.max() if len(totals_fold) else 0.0
-    if np.isfinite(ymax) and ymax > 0:
-        ax.set_ylim(0, ymax * 1.25)
-
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved: {out_png}")
-
-
-def per_participant_stacked_positive_with_std(
-    df_pid,
-    pid,
-    model_tag,
-    out_png,
-    top_k=None,
-    label_totals=True,
-    style_order=None,
-    color_map=None,
-    hatch_map=None,
-):
-    """
-    Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
-    Absolute scale (no normalization). Totals labeled.
-    Now also annotates each bar with the fold R² from <pid>_<model>_fold_metrics.csv.
-    """
-    if df_pid.empty:
-        return
-
-    # median per (feature, fold), clip negatives
-    agg = (
-        df_pid.groupby(["feature", "fold"], as_index=False)["rel_delta_mae"]
-        .median()
-        .rename(columns={"rel_delta_mae": "rel_pos"})
-    )
-    agg["rel_pos"] = agg["rel_pos"].clip(lower=0.0)
-
-    # pivot: features x folds
-    piv = agg.pivot_table(
-        index="feature", columns="fold", values="rel_pos", aggfunc="sum"
-    ).fillna(0.0)
-
-    # --- NEW: std per (feature, fold) and pivot to align with `piv`
-    std_agg = (
-        df_pid.groupby(["feature", "fold"], as_index=False)["delta_mae_std"]
-        .median()  # or .mean(), whichever matches your intent
-        .rename(columns={"delta_mae_std": "std_val"})
-    )
-
-    std_piv = std_agg.pivot_table(
-        index="feature", columns="fold", values="std_val", aggfunc="mean"
-    ).fillna(0.0)
-
-    # Robust global normalization for std -> width mapping
-    std_all = std_piv.values.ravel()
-    std_all = std_all[np.isfinite(std_all)]
-    if len(std_all) == 0:
-        s_lo, s_hi = 0.0, 1.0
+        piv = agg.pivot_table(
+            index="feature", columns="fold", values="rel_pos", aggfunc="sum"
+        )
     else:
-        # 5–95% robust range to avoid outliers dominating
-        s_lo, s_hi = np.percentile(std_all, [5, 95])
-        if s_hi <= s_lo:
-            s_hi = s_lo + 1e-12  # avoid divide by zero
+        piv = pd.DataFrame(
+            index=pd.Index([], name="feature"), columns=pd.Index([], name="fold")
+        )
 
-    # top-k features (by total positive)
-    if top_k is not None and top_k < piv.shape[0]:
-        totals_feat = piv.sum(axis=1)
-        keep = totals_feat.sort_values(ascending=False).head(top_k).index
-        piv = piv.loc[keep]
+    piv = piv.fillna(0.0)
 
-    # feature order by total positive
-    piv = piv.loc[piv.sum(axis=1).sort_values(ascending=False).index]
+    # --- Optional std pivot for widths
+    if width_by_std:
+        if not df_filt.empty and "delta_mae_std" in df_filt.columns:
+            std_agg = (
+                df_filt.groupby(["feature", "fold"], as_index=False)["delta_mae_std"]
+                .median()
+                .rename(columns={"delta_mae_std": "std_val"})
+            )
+            std_piv = std_agg.pivot_table(
+                index="feature", columns="fold", values="std_val", aggfunc="mean"
+            ).fillna(0.0)
+        else:
+            std_piv = pd.DataFrame(
+                index=piv.index.copy(), columns=pd.Index([], name="fold")
+            ).fillna(0.0)
 
-    # totals per fold
-    totals_fold = piv.sum(axis=0)
-
-    # order folds (use your helper) and ensure all exist
-    fold_order = _order_folds(df_pid)
+    # --- Ensure all folds appear as columns (even if empty after filtering)
     for f in fold_order:
         if f not in piv.columns:
             piv[f] = 0.0
+        if width_by_std and f not in std_piv.columns:
+            std_piv[f] = 0.0
+
+    # Reorder columns to full, canonical fold order
     piv = piv[fold_order]
+    if width_by_std:
+        std_piv = std_piv[fold_order]
 
-    # --- NEW: load fold-level R² and align to fold_order
-    metrics_map = load_fold_metrics(pid, model_tag, DATA_DIR)
-    # keys as strings for robust matching
-    r2_per_fold = [metrics_map.get(str(f), None) for f in fold_order]
+    # --- Top-K features (by total positive across folds)
+    if top_k is not None and top_k < piv.shape[0]:
+        keep = piv.sum(axis=1).sort_values(ascending=False).head(top_k).index
+        piv = piv.loc[keep]
+        if width_by_std:
+            std_piv = std_piv.loc[keep]
 
+    # --- Feature order (descending total)
+    piv = piv.loc[piv.sum(axis=1).sort_values(ascending=False).index]
+    if width_by_std:
+        std_piv = std_piv.loc[piv.index]
+
+    # --- Totals per fold
+    totals_fold = piv.sum(axis=0)
+
+    # --- Fold metrics (R², n)
+    metrics_map = load_fold_metrics(
+        pid, model_tag, DATA_DIR
+    )  # { fold_label: {"r2":..., "n_test_samples":...} }
+
+    # --- Plot
     x = np.arange(len(fold_order))
     features = piv.index.tolist()
     fig, ax = plt.subplots(
-        figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * len(features)))
+        figsize=(max(7, 0.7 * len(fold_order)), max(5, 0.35 * max(1, len(features))))
     )
 
     style_order = style_order or STYLE_ORDER
     color_map = color_map or COLOR_MAP
     hatch_map = hatch_map or HATCH_MAP
-
     plot_features = [f for f in style_order if f in features]
 
+    # --- std width normalization (robust) if enabled
+    if width_by_std:
+        s_lo, s_hi = _std_widths_setup(
+            std_piv, q_lo=std_quantiles[0], q_hi=std_quantiles[1]
+        )
+
     bottoms = np.zeros(len(fold_order))
-    for feat in plot_features:
-        heights = piv.loc[feat].values
-        std_vals = (
-            std_piv.loc[feat].values
-            if feat in std_piv.index
-            else np.zeros_like(heights)
-        )
-        std_vals = np.where(heights > 0, std_vals, 0.0)
-        widths = std_to_width(std_vals, s_lo, s_hi)
 
-        ax.bar(
-            x,
-            heights,
-            bottom=bottoms,
-            width=widths,
-            label=feat,
-            color=color_map.get(feat, "#cccccc"),
-            edgecolor="black",
-            hatch=hatch_map.get(feat, ""),
-        )
-        bottoms += heights
+    if plot_features:
+        for feat in plot_features:
+            heights = piv.loc[feat].reindex(fold_order).values
+            if width_by_std:
+                std_vals = (
+                    std_piv.loc[feat].reindex(fold_order).values
+                    if feat in std_piv.index
+                    else np.zeros_like(heights)
+                )
+                std_vals = np.where(heights > 0, std_vals, 0.0)
+                widths = std_to_width(std_vals, s_lo, s_hi)
+            else:
+                widths = 0.8
 
+            ax.bar(
+                x,
+                heights,
+                bottom=bottoms,
+                width=widths,
+                label=feat,
+                color=color_map.get(feat, "#cccccc"),
+                edgecolor="black",
+                hatch=hatch_map.get(feat, ""),
+            )
+            bottoms += heights
+    else:
+        # nothing above threshold -> draw empty baseline bars so x-axis & annotations still show
+        ax.bar(x, np.zeros(len(fold_order)), width=0.6, color="none", edgecolor="none")
+
+    # --- Annotations: R² (red if negative) and n on top of each fold bar
     if label_totals:
         ymax = totals_fold.max() if len(totals_fold) else 0.0
-        offset = 0.02 * ymax if ymax > 0 else 0.02
+        offset = 0.03 * ymax if (np.isfinite(ymax) and ymax > 0) else 0.03
+        line_gap = 0.04 * ymax if (np.isfinite(ymax) and ymax > 0) else 0.04
+
         for xi, f in enumerate(fold_order):
-            total = totals_fold.loc[f]
+            total = totals_fold.loc[f] if f in totals_fold.index else 0.0
+            y_base = total if (np.isfinite(total) and total > 0) else 0.0
+
             m = metrics_map.get(str(f), {})
             r2_val = m.get("r2")
             n_test = m.get("n_test_samples")
 
-            # Build multi-line label
-            lines = []
-            if r2_val is not None:
-                lines.append(f"R²={r2_val:.2f}")
-            if n_test is not None:
-                lines.append(f"n={int(n_test)}")
-
-            label = "\n".join(lines)
-            if label:
+            # R² line
+            if r2_val is not None and np.isfinite(r2_val):
+                r2_color = "red" if r2_val < 0 else "black"
                 ax.text(
                     xi,
-                    total + offset,
-                    label,
+                    y_base + offset + line_gap,
+                    f"R²={r2_val:.2f}",
                     ha="center",
                     va="bottom",
-                    fontsize=9,
-                    linespacing=1.1,
+                    fontsize=6,
+                    color=r2_color,
+                )
+            # n line
+            if n_test is not None and np.isfinite(n_test):
+                ax.text(
+                    xi,
+                    y_base + offset,
+                    f"n={int(n_test)}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6,
+                    color="black",
                 )
 
+    # --- Axes
     ax.set_xticks(x)
     ax.set_xticklabels(fold_order, rotation=45, ha="right")
     ax.set_xlabel("Fold")
-    ax.set_ylabel("Relative feature importance (sum of positives)")
-    ax.set_title(
-        f"{model_tag} — {pid}: Stacked positive relative feature importance by fold"
-    )
-    ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
-    sort_legend_alphanum(ax)
-    # Add top margin for annotations (extra headroom)
+    ax.set_ylabel("Relative feature importance")  # shortened label
+    # (no title)
+
+    if plot_features:
+        ax.legend(title="Feature", bbox_to_anchor=(1.02, 1), loc="upper left")
+        sort_legend_alphanum(ax)
+
+    # --- Headroom for labels
     ymax = totals_fold.max() if len(totals_fold) else 0.0
-    if np.isfinite(ymax) and ymax > 0:
-        ax.set_ylim(0, ymax * 1.25)
+    if not (np.isfinite(ymax) and ymax > 0):
+        ymax = 1.0
+    ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -1309,7 +1282,8 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
 
         # Stacked positive bar per fold
         out3 = os.path.join(
-            per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive.png"
+            per_pid_dir,
+            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_0.001_stacked.png",
         )
         per_participant_stacked_positive(
             df_pid,
@@ -1321,13 +1295,16 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             style_order=STYLE_ORDER,
             color_map=COLOR_MAP,
             hatch_map=HATCH_MAP,
+            width_by_std=False,
+            min_rel_delta_mae=0.001,
         )
 
         # Stacked positive bar per fold with std-based widths
         out4 = os.path.join(
-            per_pid_dir, f"{pid}_{model_tag}_folds_stacked_positive_std_widths.png"
+            per_pid_dir,
+            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_0.001_stacked_std_widths.png",
         )
-        per_participant_stacked_positive_with_std(
+        per_participant_stacked_positive(
             df_pid,
             pid,
             model_tag,
@@ -1337,4 +1314,5 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             style_order=STYLE_ORDER,
             color_map=COLOR_MAP,
             hatch_map=HATCH_MAP,
+            width_by_std=True,
         )

@@ -30,7 +30,7 @@ CONFIG = {
     "top_k": 15,
     "paths": {
         "data": "data/df_merged_mnar_v10 1.pickle",
-        "results_dir": "results_dummycomparison_timeaware_5050_split_v10",
+        "results_dir": "results_dummycomparison_timeaware_5050_split_v10_final",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
@@ -1018,7 +1018,7 @@ def test_en_or_rf_outperforms_dummy_regressor(
         f"actual={rtscv.actual_n_splits(len(X_preprocessed))}"
     )
 
-    is_significantly_better_dict = {}
+    model_type_res_dict = {}
     for model_type in ["EN", "RF"]:
         print(f"--- Evaluating model type {model_type} for {pseudonym} ---")
         if model_type == "EN":
@@ -1187,11 +1187,6 @@ def test_en_or_rf_outperforms_dummy_regressor(
             and _safe_pos(mae_res["ci_low"])
         )
 
-        # Optional: if you want Bonferroni for the two metrics, uncomment:
-        # ALPHA_EACH = ALPHA / 2.0
-        # is_significant_r2 = (r2_res["p_value"] < ALPHA_EACH) and _safe_pos(r2_res["ci_low"])
-        # is_significant_mae = (mae_res["p_value"] < ALPHA_EACH) and _safe_pos(mae_res["ci_low"])
-
         is_significantly_better = is_significant_r2 or is_significant_mae
 
         if is_significantly_better:
@@ -1200,16 +1195,39 @@ def test_en_or_rf_outperforms_dummy_regressor(
                 f"({'R²' if is_significant_r2 else ''}{' & ' if is_significant_r2 and is_significant_mae else ''}"
                 f"{'MAE' if is_significant_mae else ''})."
             )
-            is_significantly_better_dict[model_type] = True
+            model_type_res_dict[model_type]["significantly_better_than_dummy"] = True
         else:
             print(
                 f"⚠️ {model_type} not significantly better — skipping downstream steps."
             )
-            is_significantly_better_dict[model_type] = False
+            model_type_res_dict[model_type]["significantly_better_than_dummy"] = False
+        model_type_res_dict[model_type]["r2_res"] = r2_res
+        model_type_res_dict[model_type]["mae_res"] = mae_res
 
-    return is_significantly_better_dict.get(
-        "EN", False
-    ), is_significantly_better_dict.get("RF", False)
+    return model_type_res_dict
+
+
+# --- add this small helper near the top of the file (outside the loop) ---
+def _flatten_model_stats(model_type_res_dict, model_key):
+    """
+    Returns a flat dict with columns like:
+      EN_r2_p_value, EN_r2_mean_diff, EN_r2_ci_low, EN_r2_ci_high,
+      EN_mae_p_value, EN_mae_mean_diff, EN_mae_ci_low, EN_mae_ci_high,
+      EN_significantly_better_than_dummy
+    Missing values become NaN.
+    """
+    out = {}
+    m = (model_type_res_dict or {}).get(model_key, {}) or {}
+    out[f"{model_key}_significantly_better_than_dummy"] = bool(
+        m.get("significantly_better_than_dummy", False)
+    )
+    for metric in ("r2", "mae"):
+        res = m.get(f"{metric}_res", {}) or {}
+        out[f"{model_key}_{metric}_p_value"] = res.get("p_value", np.nan)
+        out[f"{model_key}_{metric}_mean_diff"] = res.get("mean_diff", np.nan)
+        out[f"{model_key}_{metric}_ci_low"] = res.get("ci_low", np.nan)
+        out[f"{model_key}_{metric}_ci_high"] = res.get("ci_high", np.nan)
+    return out
 
 
 # %% Main Processing Function ===================================================
@@ -1246,25 +1264,38 @@ def process_participants(df_raw, pseudonyms, target_column):
         n = len(y)
         if n < (min_train_size + max(min_test_size, fixed_test_size)):
             print(f"[WARN] {pseudonym}: zu wenige Datenpunkte ({n}), überspringe.")
-            participant_results[pseudonym] = f"too less data points ({n}) to proceed"
+            row = {"message": f"too less data points ({n}) to proceed"}
+            # ensure EN/RF columns exist (filled with NaN / False)
+            row.update(_flatten_model_stats({}, "EN"))
+            row.update(_flatten_model_stats({}, "RF"))
+            participant_results[pseudonym] = row
             continue
 
-        en_outperforms_dummy_regressor, rf_outperforms_dummy_regressor = (
-            test_en_or_rf_outperforms_dummy_regressor(
-                X=X,
-                y=y,
-                pseudonym=pseudonym,
-                n_splits=CONFIG["rtscv"].get("n_splits", 5),
-                n_repeats=CONFIG["rtscv"].get("n_repeats", 10),
-                test_size=fixed_test_size,
-                min_train_size=min_train_size,
-                min_test_size=min_test_size,
-            )
+        model_type_res_dict = test_en_or_rf_outperforms_dummy_regressor(
+            X=X,
+            y=y,
+            pseudonym=pseudonym,
+            n_splits=CONFIG["rtscv"].get("n_splits", 5),
+            n_repeats=CONFIG["rtscv"].get("n_repeats", 10),
+            test_size=fixed_test_size,
+            min_train_size=min_train_size,
+            min_test_size=min_test_size,
+        )
+
+        en_outperforms_dummy_regressor = model_type_res_dict.get("EN", {}).get(
+            "significantly_better_than_dummy", False
+        )
+        rf_outperforms_dummy_regressor = model_type_res_dict.get("RF", {}).get(
+            "significantly_better_than_dummy", False
         )
 
         message = f"[INFO] {pseudonym}: ElasticNet outperforms Dummy: {en_outperforms_dummy_regressor}, RandomForest outperforms Dummy: {rf_outperforms_dummy_regressor}"
         print(message)
-        participant_results[pseudonym] = message
+        # NEW: store a rich row with flattened stats (so the DF gets proper columns)
+        row = {"message": message}
+        row.update(_flatten_model_stats(model_type_res_dict, "EN"))
+        row.update(_flatten_model_stats(model_type_res_dict, "RF"))
+        participant_results[pseudonym] = row
         if not en_outperforms_dummy_regressor and not rf_outperforms_dummy_regressor:
             print("[INFO] skipping")
             continue

@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 
 plt.ioff()  # interaktiven Modus deaktivieren
 
+import re
+
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -964,116 +966,115 @@ def plot_folds_on_timeseries(
     plt.close()
 
 
-def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path):
-    # --- Assuming per_fold_df and boot_results from previous code exist ---
+def safe_filename(base: str) -> str:
+    # replace any character not alphanumeric, dash, underscore, or dot
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", base)
 
-    # 1️⃣ Basic layout setup
+
+def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path):
+    """
+    Creates a 2x2 panel:
+      - ax1: R² per fold (Model vs Dummy)
+      - ax2: MAE per fold (Model vs Dummy)
+      - ax3: ΔR² per fold (Model - Dummy)
+      - ax4: ΔMAE per fold (Dummy - Model)  [positive = better]
+    Ensures identical x-axis tick positions/limits across all subplots,
+    and applies colors from PLOT_STYLES for EN/RF.
+    """
+    # Normalize model_type and fetch colors
+    mtype = str(model_type).strip().lower()
+    if "rf" in mtype or mtype == "randomforest":
+        model_label = "RF"
+        model_color = PLOT_STYLES["colors"].get("RF", "#1f77b4")
+    else:
+        # treat everything else as ElasticNet
+        model_label = "EN"
+        model_color = PLOT_STYLES["colors"].get("Elasticnet", "#0072B2")
+    dummy_color = PLOT_STYLES["colors"].get("Dummy", "#808080")
+
+    # Make sure folds are sorted and unique
+    df = per_fold_df.copy()
+    df = df.sort_values("fold")
+    x = df["fold"].to_numpy()
+
+    # Layout
     sns.set_style("whitegrid")
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     (ax1, ax2), (ax3, ax4) = axes
-    fig.suptitle(
-        f"{model_type} vs DummyRegressor — Fold-wise Performance",
-        fontsize=14,
-        fontweight="bold",
-    )
 
-    # 2️⃣ R² per fold (EN vs Dummy)
-    ax1.plot(
-        per_fold_df["fold"],
-        per_fold_df["r2_en"],
-        marker="o",
-        label=model_type,
-        color="#0072B2",
-    )
-    ax1.plot(
-        per_fold_df["fold"],
-        per_fold_df["r2_dummy"],
-        marker="s",
-        label="Dummy",
-        color="#E69F00",
-    )
+    # --- ax1: R² per fold ---
+    ax1.plot(x, df["r2_en"], marker="o", label=model_label, color=model_color)
+    ax1.plot(x, df["r2_dummy"], marker="s", label="Dummy", color=dummy_color)
     ax1.axhline(0, color="gray", lw=1, linestyle="--")
     ax1.set_title("R² per Fold")
     ax1.set_xlabel("Fold")
     ax1.set_ylabel("R²")
-    ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # 3️⃣ MAE per fold (EN vs Dummy)
-    ax2.plot(
-        per_fold_df["fold"],
-        per_fold_df["mae_en"],
-        marker="o",
-        label=model_type,
-        color="#0072B2",
-    )
-    ax2.plot(
-        per_fold_df["fold"],
-        per_fold_df["mae_dummy"],
-        marker="s",
-        label="Dummy",
-        color="#E69F00",
-    )
+    # --- ax2: MAE per fold ---
+    ax2.plot(x, df["mae_en"], marker="o", label=model_label, color=model_color)
+    ax2.plot(x, df["mae_dummy"], marker="s", label="Dummy", color=dummy_color)
     ax2.set_title("MAE per Fold")
     ax2.set_xlabel("Fold")
     ax2.set_ylabel("Mean Absolute Error")
-    ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    # 4️⃣ ΔR² bar chart (improvement)
+    # --- ax3: ΔR² per fold ---
+    # Use barplot but strictly lock ticks/limits to the same x
     sns.barplot(
-        x="fold",
-        y="delta_r2",
-        data=per_fold_df,
-        color="#009E73",
-        ax=ax3,
+        x=x, y=df["delta_r2"], color=model_color, ax=ax3, ci=None, estimator=np.mean
     )
     ax3.axhline(0, color="gray", lw=1)
-    ax3.set_title("ΔR² = R²(EN) - R²(Dummy)")
+    ax3.set_title(f"ΔR² = R²({model_label}) - R²(Dummy)")
     ax3.set_xlabel("Fold")
     ax3.set_ylabel("R² Improvement")
 
-    # Add bootstrap summary
-    r2_res = boot_results["R2"]
-    ax3.text(
-        0.5,
-        max(per_fold_df["delta_r2"]) * 0.9,
-        f"Mean ΔR² = {r2_res['mean_diff']:.3f}\n"
-        f"95% CI = [{r2_res['ci_low']:.3f}, {r2_res['ci_high']:.3f}]\n"
-        f"p = {r2_res['p_value']:.4f}",
-        ha="center",
-        va="top",
-        fontsize=10,
-        transform=ax3.transAxes,
-        bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
-    )
-
-    # 5️⃣ ΔMAE bar chart (improvement)
+    # --- ax4: ΔMAE per fold ---
     sns.barplot(
-        x="fold",
-        y="delta_mae",
-        data=per_fold_df,
-        color="#56B4E9",
-        ax=ax4,
+        x=x, y=df["delta_mae"], color=model_color, ax=ax4, ci=None, estimator=np.mean
     )
     ax4.axhline(0, color="gray", lw=1)
-    ax4.set_title("ΔMAE = MAE(Dummy) - MAE(EN)")
+    ax4.set_title(f"ΔMAE = MAE(Dummy) - MAE({model_label})")
     ax4.set_xlabel("Fold")
     ax4.set_ylabel("MAE Improvement (positive = better)")
 
-    mae_res = boot_results["MAE"]
-    ax4.text(
-        0.5,
-        max(per_fold_df["delta_mae"]) * 0.9,
-        f"Mean ΔMAE = {mae_res['mean_diff']:.3f}\n"
-        f"95% CI = [{mae_res['ci_low']:.3f}, {mae_res['ci_high']:.3f}]\n"
-        f"p = {mae_res['p_value']:.4f}",
-        ha="center",
-        va="top",
-        fontsize=10,
-        transform=ax4.transAxes,
-        bbox=dict(facecolor="white", edgecolor="none", alpha=0.7),
-    )
+    # --- enforce identical x-axis ticks and limits across all axes ---
+    def _sync_xaxis(ax_list, ticks):
+        # set identical ticks and labels
+        for ax in ax_list:
+            ax.set_xticks(ticks)
+            ax.set_xticklabels([str(t) for t in ticks])
+        # add small padding around the integer fold range
+        xmin, xmax = np.min(ticks), np.max(ticks)
+        pad = 0.5 if len(ticks) > 1 else 0.5
+        for ax in ax_list:
+            ax.set_xlim(xmin - pad, xmax + pad)
+
+    _sync_xaxis([ax1, ax2, ax3, ax4], x)
+
+    # Legends (top row only; bottom inherits)
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    if handles1:
+        ax1.legend(handles1, labels1, loc="best")
+
+    # Bootstrap summary in filename footer
+    r2_res = boot_results.get("R2", {})
+    mae_res = boot_results.get("MAE", {})
+    r2_md = r2_res.get("mean_diff", np.nan)
+    r2_lo = r2_res.get("ci_low", np.nan)
+    r2_hi = r2_res.get("ci_high", np.nan)
+    r2_pv = r2_res.get("p_value", np.nan)
+
+    mae_md = mae_res.get("mean_diff", np.nan)
+    mae_lo = mae_res.get("ci_low", np.nan)
+    mae_hi = mae_res.get("ci_high", np.nan)
+    mae_pv = mae_res.get("p_value", np.nan)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(out_path, dpi=300)
+    summary = (
+        f"Mean_dR2_{r2_md:.3f}_CI_{r2_lo:.3f}-{r2_hi:.3f}_p_{r2_pv:.4f}"
+        f"_Mean_dMAE_{mae_md:.3f}_CI_{mae_lo:.3f}-{mae_hi:.3f}_p_{mae_pv:.4f}"
+    )
+    fname = safe_filename(f"{out_path}_{summary}.png")
+    plt.savefig(fname, dpi=300)
+    plt.close(fig)

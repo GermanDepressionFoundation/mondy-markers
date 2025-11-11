@@ -1,3 +1,4 @@
+import json
 import os
 
 import matplotlib.pyplot as plt
@@ -38,3 +39,12 @@ def add_logo_to_figure(
 
     ab = AnnotationBbox(imagebox, xy, xycoords="figure fraction", frameon=False)
     ax_logo.add_artist(ab)
+
+
+pseudonym_to_letter_mapping_path = os.path.join("config", "pseudonym_to_letter.json")
+if os.path.exists(pseudonym_to_letter_mapping_path):
+    with open(pseudonym_to_letter_mapping_path, "r", encoding="utf-8") as f:
+        PSEUDONYM_TO_LETTER = json.load(f)
+else:
+    print(f"[WARN] Mapping file not found at {pseudonym_to_letter_mapping_path}")
+    PSEUDONYM_TO_LETTER = {}

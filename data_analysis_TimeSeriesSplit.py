@@ -21,6 +21,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from RepeatedTimeSeriesSplit import RepeatedTimeSeriesSplit
+from utils import PSEUDONYM_TO_LETTER
 
 set_config(transform_output="pandas")
 
@@ -1156,12 +1157,16 @@ def test_en_or_rf_outperforms_dummy_regressor(
         )
         print(per_fold_df)
 
-        plot_model_vs_dummyregressor(
-            model_type=model_type,
-            per_fold_df=per_fold_df,
-            boot_results=boot_results,
-            out_path=f"{RESULTS_DIR}/{pseudonym}_{model_type}_vs_dummy.png",
-        )
+        # Save per-fold metrics and bootstrap results for plot-only mode
+        csv_path = f"{RESULTS_DIR}/{pseudonym}_{model_type}_vs_dummy.csv"
+        per_fold_df.to_csv(csv_path, index=False)
+
+        with open(
+            f"{RESULTS_DIR}/{pseudonym}_{model_type}_vs_dummy_boot.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(boot_results, f, indent=2)
 
         # significance thresholds
         ALPHA = 0.05  # one-sided test level
@@ -1240,7 +1245,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     ensure_results_dir()
 
-    for pseudonym in pseudonyms:
+    for pseudonym in ["bubblypie2"]:
         print("========================================")
         print(f"Processing {pseudonym}")
         print("========================================")
@@ -1752,65 +1757,151 @@ def process_participants(df_raw, pseudonyms, target_column):
             )
 
     participant_results_df = pd.DataFrame.from_dict(participant_results, orient="index")
-    participant_results_df.to_csv(f"{RESULTS_DIR}/participant_processing_summary.csv")
+
+    # --- Add 'letter' column from mapping file ---
+    participant_results_df["letter"] = participant_results_df.index.to_series().map(
+        PSEUDONYM_TO_LETTER
+    )
+
+    # Save results
+    participant_results_df.to_csv(
+        os.path.join(RESULTS_DIR, "participant_processing_summary.csv")
+    )
 
     return results, plot_data
 
 
+def generate_all_plots(results_dir: str, results: dict, plot_data: dict):
+    """Create every figure from serialized artifacts only."""
+    # model-level bars
+    plot_mae_rmssd_bar_2(results_dir, results, model_key="elastic")
+    plot_mae_rmssd_bar_2(results_dir, results, model_key="rf")
+
+    # time series & error bands (ElasticNet)
+    plot_phq2_timeseries_from_results(results_dir, plot_data, "elastic")
+    plot_phq2_timeseries_with_adherence_from_results(results_dir, plot_data, "elastic")
+    plot_phq2_test_errors_from_results(
+        results_dir, plot_data, "elastic", show_pred_ci=False
+    )
+
+    # time series & error bands (RF)
+    plot_phq2_timeseries_from_results(results_dir, plot_data, "rf")
+    plot_phq2_test_errors_from_results(results_dir, plot_data, "rf", show_pred_ci=False)
+
+    # --- Model vs. DummyRegressor plots (from saved CSV+JSON) ---
+    for pseudonym in os.listdir(results_dir):
+        if not pseudonym.endswith("_EN_vs_dummy_boot.json") and not pseudonym.endswith(
+            "_RF_vs_dummy_boot.json"
+        ):
+            continue
+
+    # Or cleaner:
+    for pseudonym in PSEUDONYM_TO_LETTER.keys():
+        for model_type in ["EN", "RF"]:
+            base_path = os.path.join(results_dir, f"{pseudonym}_{model_type}_vs_dummy")
+            csv_path = base_path + ".csv"
+            json_path = base_path + "_boot.json"
+            if not os.path.exists(csv_path) or not os.path.exists(json_path):
+                continue
+            per_fold_df = pd.read_csv(csv_path)
+            with open(json_path, "r", encoding="utf-8") as f:
+                boot_results = json.load(f)
+            letter = PSEUDONYM_TO_LETTER.get(pseudonym, "")
+            out_path = f"{results_dir}/{pseudonym}_{letter}_{model_type}_vs_dummy"
+            plot_model_vs_dummyregressor(
+                model_type=model_type,
+                per_fold_df=per_fold_df,
+                boot_results=boot_results,
+                out_path=out_path,
+            )
+
+
+def load_cached_artifacts(cache_path: str) -> tuple[dict, dict]:
+    """Load (results, plot_data) from the single pickle your pipeline saves."""
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(
+            f"No cached artifacts found at {cache_path}. Run with --mode compute first."
+        )
+    cached = pd.read_pickle(cache_path)
+    # accept either a tuple or a dict with keys
+    if isinstance(cached, tuple) and len(cached) == 2:
+        return cached
+    if isinstance(cached, dict) and "results" in cached and "plot_data" in cached:
+        return cached["results"], cached["plot_data"]
+    raise ValueError(f"Unexpected cache format in {cache_path}.")
+
+
 if __name__ == "__main__":
-    # %% Run the pipeline ===========================================================
-    # Load dataset
-    df_raw = pd.read_pickle(DATA_PATH)
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Compute results and/or plot from cache."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["both", "compute", "plot"],
+        default="both",
+        help="Run full computation, only compute, or only plot from cached artifacts.",
+    )
+    parser.add_argument(
+        "--cache",
+        default=CONFIG["paths"]["cache_results"],
+        help="Path to the cached (results, plot_data) pickle.",
+    )
+    parser.add_argument(
+        "--results-dir",
+        default=RESULTS_DIR,
+        help="Where to write plots/CSVs.",
+    )
+    parser.add_argument(
+        "--data",
+        default=DATA_PATH,
+        help="Path to the input dataframe pickle (only used in compute mode).",
+    )
+    args = parser.parse_args()
+
+    # --- PLOT-ONLY MODE ---------------------------------------------------------
+    if args.mode == "plot":
+        print(f"[Info] Plot-only mode. Loading cached artifacts from {args.cache} ...")
+        results, plot_data = load_cached_artifacts(args.cache)
+        generate_all_plots(args.results_dir, results, plot_data)
+        # (Optional) also re-export performance table if desired:
+        pd.DataFrame.from_dict(results, orient="index").to_csv(
+            f"{args.results_dir}/model_performance_summary.csv"
+        )
+        raise SystemExit(0)
+
+    # --- COMPUTE (and maybe plot) ----------------------------------------------
+    # Load dataset (only needed when computing)
+    df_raw = pd.read_pickle(args.data)
     df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
     df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
     df_raw["day_since_start"] = df_raw.groupby("patient_id", group_keys=False).apply(
         days_since_start
     )
-
     df_raw = df_raw[["patient_id", "timestamp_utc", PHQ2_COLUMN] + FEATURES_TO_CONSIDER]
 
     # Map IDs to pseudonyms
     json_file_path = "config/id_to_pseudonym.json"
     with open(json_file_path, "r", encoding="utf-8") as f:
         id_to_pseudonym = json.load(f)
-
     df_raw["pseudonym"] = df_raw["patient_id"].map(id_to_pseudonym)
-    df_raw = df_raw.dropna(subset=["pseudonym"])
-    df_raw = df_raw.drop(columns=["patient_id"])
+    df_raw = df_raw.dropna(subset=["pseudonym"]).drop(columns=["patient_id"])
 
     target_column = PHQ2_COLUMN
     pseudonyms = df_raw["pseudonym"].unique()
 
-    # %% Caching mechanism ===========================================================
-    if os.path.exists(CACHE_RESULTS_PATH) and LOAD_CACHED_RESULTS:
-        print(f"[Info] Loading cached results from {CACHE_RESULTS_PATH} ...")
-        cached_data = pd.read_pickle(CACHE_RESULTS_PATH)
-        results, plot_data = cached_data
-    else:
-        print("[Info] Computing results using process_participants ...")
-        results, plot_data = process_participants(df_raw, pseudonyms, target_column)
-        print(f"[Info] Saving results to {CACHE_RESULTS_PATH} ...")
-        pd.to_pickle((results, plot_data), CACHE_RESULTS_PATH)
+    print("[Info] Computing results using process_participants ...")
+    results, plot_data = process_participants(df_raw, pseudonyms, target_column)
 
-    # %% Plots (MAE/RMSSD & Zeitreihen) ============================================
-    plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="elastic")
-    plot_mae_rmssd_bar_2(RESULTS_DIR, results, model_key="rf")
+    # Save cache artifacts for future plot-only runs
+    print(f"[Info] Saving artifacts to {args.cache} ...")
+    pd.to_pickle((results, plot_data), args.cache)
 
-    plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "elastic")
-    plot_phq2_timeseries_with_adherence_from_results(RESULTS_DIR, plot_data, "elastic")
-    plot_phq2_test_errors_from_results(
-        RESULTS_DIR, plot_data, "elastic", show_pred_ci=False
-    )
-    plot_phq2_test_errors_from_results(
-        RESULTS_DIR, plot_data, "elastic", show_pred_ci=False
-    )
-
-    plot_phq2_timeseries_from_results(RESULTS_DIR, plot_data, "rf")
-    plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf", show_pred_ci=False)
-    plot_phq2_test_errors_from_results(RESULTS_DIR, plot_data, "rf", show_pred_ci=False)
-
-    # %% Save evaluation metrics (per participant) ==================================
+    # Always export a summary CSV when computing
     results_df = pd.DataFrame.from_dict(results, orient="index")
-    results_df.to_csv(f"{RESULTS_DIR}/model_performance_summary.csv")
+    results_df.to_csv(f"{args.results_dir}/model_performance_summary.csv")
 
-    # %%
+    if args.mode in ("both",):
+        print("[Info] Generating plots from freshly computed artifacts ...")
+        generate_all_plots(args.results_dir, results, plot_data)

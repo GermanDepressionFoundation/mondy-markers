@@ -30,8 +30,8 @@ CONFIG = {
     "random_state": 42,
     "top_k": 15,
     "paths": {
-        "data": "data/df_merged_mnar_v10 1.pickle",
-        "results_dir": "results_dummycomparison_timeaware_5050_split_v10_final",
+        "data": "data/df_merged_mnar_v11 1.pickle",
+        "results_dir": "results_dummycomparison_timeaware_5050_split_v11_final",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",
@@ -103,7 +103,7 @@ RANDOM_STATE = CONFIG["random_state"]
 PHQ2_COLUMN = CONFIG["targets"]["phq2"]
 PHQ9_COLUMN = CONFIG["targets"]["phq9"]
 
-feature_config = pd.read_csv("config/feature_config_v10.csv")
+feature_config = pd.read_csv("config/feature_config_v11_final.csv")
 LOG1P_COLS = feature_config[feature_config["scaler"] == "log1p"]["feature"].tolist()
 ZSCORE_COLS = feature_config[feature_config["scaler"] == "zscore"]["feature"].tolist()
 MINMAX_COLS = feature_config[feature_config["scaler"] == "minmax"]["feature"].tolist()
@@ -1245,7 +1245,7 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     ensure_results_dir()
 
-    for pseudonym in ["bubblypie2"]:
+    for pseudonym in pseudonyms:
         print("========================================")
         print(f"Processing {pseudonym}")
         print("========================================")

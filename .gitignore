@@ -3,7 +3,8 @@
 *.xlsx
 *.pkl
 *.pickle
-*.json
+config/*.json
+results*/*.json
 *.html
 *.pyc
 .venv/

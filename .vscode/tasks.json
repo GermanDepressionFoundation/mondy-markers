@@ -1,0 +1,50 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "compute",
+            "type": "shell",
+            "command": "C:\\Users\\JohannesLeimhofer\\miniconda3\\envs\\ds\\python",
+            "args": [
+                "data_analysis_TimeSeriesSplit.py",
+                "--mode",
+                "compute"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Run full computation only (no plotting)."
+        },
+        {
+            "label": "plot",
+            "type": "shell",
+            "command": "C:\\Users\\JohannesLeimhofer\\miniconda3\\envs\\ds\\python",
+            "args": [
+                "data_analysis_TimeSeriesSplit.py",
+                "--mode",
+                "plot"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Generate plots only from cached results."
+        },
+        {
+            "label": "both",
+            "type": "shell",
+            "command": "C:\\Users\\JohannesLeimhofer\\miniconda3\\envs\\ds\\python",
+            "args": [
+                "data_analysis_TimeSeriesSplit.py",
+                "--mode",
+                "both"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Run computation and plotting in one go."
+        }
+    ]
+}

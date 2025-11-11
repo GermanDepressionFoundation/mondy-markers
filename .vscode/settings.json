@@ -1,0 +1,28 @@
+{
+    // --- General formatting ---
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": "explicit",
+        "source.fixAll": "explicit"
+    },
+
+    // --- Python formatting settings ---
+    "python.formatting.provider": "black",
+    "python.formatting.blackArgs": [
+        "--line-length",
+        "88" // Adjust if you prefer a different line length
+    ],
+
+    // --- isort settings (to match Black style) ---
+    "isort.args": [
+        "--profile",
+        "black"
+    ],
+
+    // --- Linting (optional, for cleaner code) ---
+    "python.linting.enabled": true,
+    "python.linting.flake8Enabled": true,
+    "python.linting.flake8Args": [
+        "--max-line-length=88"
+    ]
+}

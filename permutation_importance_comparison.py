@@ -1223,7 +1223,7 @@ def per_participant_stacked_positive(
                 ax.text(
                     xi,
                     y_base + offset + line_gap,
-                    rf"$\overline{{R^2}}$={r2_val:.2f}",
+                    f"R²={r2_val:.2f}",
                     ha="center",
                     va="bottom",
                     fontsize=6,
@@ -1243,7 +1243,7 @@ def per_participant_stacked_positive(
 
     # --- Axes
     ax.set_xticks(x)
-    ax.set_xticklabels(fold_order, rotation=45, ha="right")
+    ax.set_xticklabels(fold_order, rotation=0)
     ax.set_xlabel("Fold")
     ax.set_ylabel("Relative feature importance")  # shortened label
     # (no title)

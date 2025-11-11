@@ -971,7 +971,9 @@ def safe_filename(base: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", base)
 
 
-def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path):
+def plot_model_vs_dummyregressor(
+    model_type, per_fold_df, boot_results, results_dir, filename_prefix
+):
     """
     Creates a 2x2 panel:
       - ax1: R² per fold (Model vs Dummy)
@@ -1039,14 +1041,22 @@ def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path
     ax4.set_ylabel("MAE Improvement (positive = better)")
 
     # --- enforce identical x-axis ticks and limits across all axes ---
-    def _sync_xaxis(ax_list, ticks):
-        # set identical ticks and labels
+    def _sync_xaxis(ax_list, x_values):
+        # Determine tick positions every 5 folds
+        xmin, xmax = np.min(x_values), np.max(x_values)
+        tick_step = 5
+        ticks = np.arange(xmin, xmax + 1, tick_step)
+        if ticks[-1] != xmax:
+            # ensure the last fold is included if not perfectly divisible
+            ticks = np.append(ticks, xmax)
+
+        # Set identical ticks and labels
         for ax in ax_list:
             ax.set_xticks(ticks)
-            ax.set_xticklabels([str(t) for t in ticks])
-        # add small padding around the integer fold range
-        xmin, xmax = np.min(ticks), np.max(ticks)
-        pad = 0.5 if len(ticks) > 1 else 0.5
+            ax.set_xticklabels([str(int(t)) for t in ticks])
+
+        # Add small padding around fold range
+        pad = 0.5 if len(x_values) > 1 else 0.5
         for ax in ax_list:
             ax.set_xlim(xmin - pad, xmax + pad)
 
@@ -1055,7 +1065,8 @@ def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path
     # Legends (top row only; bottom inherits)
     handles1, labels1 = ax1.get_legend_handles_labels()
     if handles1:
-        ax1.legend(handles1, labels1, loc="best")
+        # ax1.legend(handles1, labels1, loc="best")
+        pass
 
     # Bootstrap summary in filename footer
     r2_res = boot_results.get("R2", {})
@@ -1071,10 +1082,11 @@ def plot_model_vs_dummyregressor(model_type, per_fold_df, boot_results, out_path
     mae_pv = mae_res.get("p_value", np.nan)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
+    add_logo_to_figure(fig)
     summary = (
         f"Mean_dR2_{r2_md:.3f}_CI_{r2_lo:.3f}-{r2_hi:.3f}_p_{r2_pv:.4f}"
         f"_Mean_dMAE_{mae_md:.3f}_CI_{mae_lo:.3f}-{mae_hi:.3f}_p_{mae_pv:.4f}"
     )
-    fname = safe_filename(f"{out_path}_{summary}.png")
-    plt.savefig(fname, dpi=300)
+    fname = safe_filename(f"{filename_prefix}_{summary}.png")
+    plt.savefig(os.path.join(results_dir, fname), dpi=300)
     plt.close(fig)

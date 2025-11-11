@@ -1758,14 +1758,21 @@ def process_participants(df_raw, pseudonyms, target_column):
 
     participant_results_df = pd.DataFrame.from_dict(participant_results, orient="index")
 
-    # --- Add 'letter' column from mapping file ---
-    participant_results_df["letter"] = participant_results_df.index.to_series().map(
+    # --- Add 'pseudonym' and 'letter' columns ---
+    participant_results_df["pseudonym"] = participant_results_df.index
+    participant_results_df["letter"] = participant_results_df["pseudonym"].map(
         PSEUDONYM_TO_LETTER
     )
 
-    # Save results
+    # --- Reorder columns: pseudonym and letter first ---
+    cols = ["pseudonym", "letter"] + [
+        c for c in participant_results_df.columns if c not in ["pseudonym", "letter"]
+    ]
+    participant_results_df = participant_results_df[cols]
+
+    # --- Save results ---
     participant_results_df.to_csv(
-        os.path.join(RESULTS_DIR, "participant_processing_summary.csv")
+        os.path.join(RESULTS_DIR, "participant_processing_summary.csv"), index=False
     )
 
     return results, plot_data

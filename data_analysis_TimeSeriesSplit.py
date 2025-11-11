@@ -1020,6 +1020,7 @@ def test_en_or_rf_outperforms_dummy_regressor(
 
     model_type_res_dict = {}
     for model_type in ["EN", "RF"]:
+        model_type_res_dict[model_type] = {}
         print(f"--- Evaluating model type {model_type} for {pseudonym} ---")
         if model_type == "EN":
 

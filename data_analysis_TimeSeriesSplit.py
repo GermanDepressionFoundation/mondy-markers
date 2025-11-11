@@ -1788,13 +1788,6 @@ def generate_all_plots(results_dir: str, results: dict, plot_data: dict):
     plot_phq2_timeseries_from_results(results_dir, plot_data, "rf")
     plot_phq2_test_errors_from_results(results_dir, plot_data, "rf", show_pred_ci=False)
 
-    # --- Model vs. DummyRegressor plots (from saved CSV+JSON) ---
-    for pseudonym in os.listdir(results_dir):
-        if not pseudonym.endswith("_EN_vs_dummy_boot.json") and not pseudonym.endswith(
-            "_RF_vs_dummy_boot.json"
-        ):
-            continue
-
     # Or cleaner:
     for pseudonym in PSEUDONYM_TO_LETTER.keys():
         for model_type in ["EN", "RF"]:
@@ -1807,12 +1800,12 @@ def generate_all_plots(results_dir: str, results: dict, plot_data: dict):
             with open(json_path, "r", encoding="utf-8") as f:
                 boot_results = json.load(f)
             letter = PSEUDONYM_TO_LETTER.get(pseudonym, "")
-            out_path = f"{results_dir}/{pseudonym}_{letter}_{model_type}_vs_dummy"
             plot_model_vs_dummyregressor(
                 model_type=model_type,
                 per_fold_df=per_fold_df,
                 boot_results=boot_results,
-                out_path=out_path,
+                results_dir=results_dir,
+                filename_prefix=f"{pseudonym}_{letter}_{model_type}_vs_dummy",
             )
 
 

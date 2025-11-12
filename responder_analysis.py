@@ -6,7 +6,7 @@ from utils import PLOT_STYLES, add_logo_to_figure
 
 plt.rcParams["font.family"] = PLOT_STYLES["font"]
 
-RESULTS_DIR = "results_dummycomparison_timeaware_5050_split_v10"
+RESULTS_DIR = "results_v11_final"
 results_df = pd.read_csv(f"{RESULTS_DIR}/model_performance_summary.csv", index_col=0)
 results_df = results_df.sort_index()
 # Sort by RF R² for consistency

@@ -12,7 +12,7 @@ from matplotlib.patches import Patch
 
 from utils import PSEUDONYM_TO_LETTER, add_logo_to_figure
 
-DATA_DIR = "results_dummycomparison_timeaware_5050_split_v10"
+DATA_DIR = "results_v11_final"
 
 # ===== Prefix-aware, consistent styles =====
 # distinct base hues (colorblind-aware-ish). these are cluster *anchors*.

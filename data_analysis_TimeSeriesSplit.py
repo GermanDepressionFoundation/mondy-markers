@@ -31,7 +31,7 @@ CONFIG = {
     "top_k": 15,
     "paths": {
         "data": "data/df_merged_mnar_v11 1.pickle",
-        "results_dir": "results_dummycomparison_timeaware_5050_split_v11_final",
+        "results_dir": "results_v11_final",
     },
     "targets": {
         "phq2": "abend_PHQ2_sum",

@@ -1379,38 +1379,81 @@ def stacked_mean_relmae_per_model(
     style_order=None,
     color_map=None,
     hatch_map=None,
-    min_rel_delta_mae=None,  # CHANGED: allow None for dynamic threshold
-    rel_threshold_fraction=0.05,  # NEW: 5% of max positive value across both models
-    top_k=None,  # optional: keep top-K features by total across both models
+    min_rel_delta_mae=None,  # allow None for dynamic threshold
+    rel_threshold_fraction=0.05,  # fraction of max positive value across both models
+    top_k=None,
     show_legend=True,
-    data_dir=DATA_DIR,  # to read *_fold_metrics.csv
-    width_by_std=False,  # encode segment width from std
-    std_quantiles=(5, 95),  # robust range for width mapping
-    base_width=0.65,  # width when width_by_std=False
+    data_dir=DATA_DIR,
+    width_by_std=False,
+    std_quantiles=(5, 95),
+    base_width=0.65,
+    participant_summary_path=None,  # NEW
 ):
     """
     Two-bar stacked plot (EN, RF). Each stack level is the MEAN relative feature
     importance across participants for that model (positives only, thresholded).
 
-    Threshold behavior:
-      - If min_rel_delta_mae is not None: use it as a fixed cutoff.
-      - If min_rel_delta_mae is None: compute a dynamic threshold as
-        rel_threshold_fraction * max positive rel_delta_mae across both models.
-
-    On top of each model bar:
-      - R²=<mean of per-participant mean R² over folds> (red if negative)
-      - p=<#participants>
-
-    If width_by_std=True:
-      - For each model & feature, compute a robust std summary: median(delta_mae_std across participants)
-      - Pool both models’ feature-stds to get robust (q_lo, q_hi) via _std_widths_setup
-      - Map std -> width with std_to_width
+    IMPORTANT: Only participants that are significant for BOTH EN and RF
+    (EN_significantly_better_than_dummy & RF_significantly_better_than_dummy)
+    in participant_processing_summary.csv are included.
     """
 
-    # ---- Determine dynamic threshold if requested (global across EN+RF) ----
+    # ---------- load participant summary & build significant pseudonym set ----------
+    if participant_summary_path is None:
+        participant_summary_path = os.path.join(
+            data_dir, "participant_processing_summary.csv"
+        )
+
+    sig_pids_both = None  # set of pseudonyms used for BOTH models
+
+    try:
+        if os.path.exists(participant_summary_path):
+            summary = pd.read_csv(participant_summary_path)
+
+            required_cols = {
+                "pseudonym",
+                "EN_significantly_better_than_dummy",
+                "RF_significantly_better_than_dummy",
+            }
+            if not required_cols.issubset(summary.columns):
+                missing = required_cols - set(summary.columns)
+                print(
+                    f"Warning: participant summary missing required columns: {missing}"
+                )
+            else:
+                sig_en_pids = set(
+                    summary.loc[
+                        summary["EN_significantly_better_than_dummy"] == True,
+                        "pseudonym",
+                    ]
+                    .astype(str)
+                    .tolist()
+                )
+                sig_rf_pids = set(
+                    summary.loc[
+                        summary["RF_significantly_better_than_dummy"] == True,
+                        "pseudonym",
+                    ]
+                    .astype(str)
+                    .tolist()
+                )
+                sig_pids_both = sig_en_pids & sig_rf_pids
+                print(
+                    f"Participants significant for EN: {len(sig_en_pids)}, "
+                    f"for RF: {len(sig_rf_pids)}, intersection (used): {len(sig_pids_both)}"
+                )
+        else:
+            print(
+                f"Warning: participant summary not found at {participant_summary_path}. "
+                "Using all participants."
+            )
+    except Exception as e:
+        print(f"Warning: could not read participant summary: {e}")
+        sig_pids_both = None
+
+    # ---------- dynamic threshold over EN+RF if requested ----------
     if min_rel_delta_mae is None:
         pos_vals = []
-
         for df in (df_en_tidy, df_rf_tidy):
             if df is not None and not df.empty and "rel_delta_mae" in df.columns:
                 vals = df.loc[df["rel_delta_mae"] > 0, "rel_delta_mae"].values
@@ -1427,31 +1470,48 @@ def stacked_mean_relmae_per_model(
         else:
             min_rel_delta_mae = 0.0
 
-    # ---- helpers ----
-    def _per_model_feature_means_and_pids(df_tidy, thr):
-        if df_tidy.empty:
+    # ---------- helpers ----------
+    def _per_model_feature_means_and_pids(df_tidy, thr, allowed_pids=None):
+        """
+        Return:
+            f_means: Series(feature -> mean rel_pos across allowed participants)
+            pids:    list of participants actually used (after allowed_pids filter)
+            df_filt: thresholded tidy df (for std summaries)
+        """
+        if df_tidy is None or df_tidy.empty:
             return pd.Series(dtype=float), [], pd.DataFrame()
-        pids = list(dict.fromkeys(df_tidy["pid"].astype(str).tolist()))
-        df = df_tidy[df_tidy["rel_delta_mae"] > thr].copy()
+
+        df = df_tidy.copy()
+        df["pid"] = df["pid"].astype(str)
+
+        if allowed_pids is not None:
+            allowed_pids = {str(p) for p in allowed_pids}
+            df = df[df["pid"].isin(allowed_pids)]
+
         if df.empty:
-            return pd.Series(dtype=float), pids, pd.DataFrame()
+            return pd.Series(dtype=float), [], pd.DataFrame()
+
+        pids_used = list(dict.fromkeys(df["pid"].tolist()))
+
+        df_filt = df[df["rel_delta_mae"] > thr].copy()
+        if df_filt.empty:
+            return pd.Series(dtype=float), pids_used, pd.DataFrame()
+
         g = (
-            df.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
+            df_filt.groupby(["feature", "pid"], as_index=False)["rel_delta_mae"]
             .mean()
             .rename(columns={"rel_delta_mae": "rel_pos"})
         )
         g["rel_pos"] = g["rel_pos"].clip(lower=0.0)
+
         piv = g.pivot_table(
             index="feature", columns="pid", values="rel_pos", aggfunc="sum"
         ).fillna(0.0)
         f_means = piv.mean(axis=1)
-        return f_means, pids, df  # return filtered df for std summaries
+
+        return f_means, pids_used, df_filt
 
     def _per_model_feature_std_robust(df_filtered):
-        """
-        Return Series: feature -> robust std summary (median over participants).
-        df_filtered must contain columns: feature, pid, delta_mae_std (after thresholding rel_delta_mae).
-        """
         if df_filtered.empty or "delta_mae_std" not in df_filtered.columns:
             return pd.Series(dtype=float)
         s = (
@@ -1460,22 +1520,24 @@ def stacked_mean_relmae_per_model(
             .pivot_table(
                 index="feature", columns="pid", values="delta_mae_std", aggfunc="mean"
             )
-            .median(axis=1)  # robust across participants
+            .median(axis=1)
         )
         return s
 
-    # ---- compute per-model feature means (and keep filtered df for std) ----
+    # ---------- compute per-model means using ONLY sig_pids_both ----------
     en_means, en_pids, en_df_filt = _per_model_feature_means_and_pids(
-        df_en_tidy, min_rel_delta_mae
+        df_en_tidy,
+        min_rel_delta_mae,
+        allowed_pids=sig_pids_both,  # <--- key line: intersection
     )
     rf_means, rf_pids, rf_df_filt = _per_model_feature_means_and_pids(
-        df_rf_tidy, min_rel_delta_mae
+        df_rf_tidy,
+        min_rel_delta_mae,
+        allowed_pids=sig_pids_both,  # <--- same set for RF
     )
 
-    # Union of features present in either model
+    # ---------- union of features, optional top-K ----------
     features_all = sorted(set(en_means.index).union(set(rf_means.index)))
-
-    # ---- optional top-K by total across both models ----
     if top_k is not None and top_k > 0 and len(features_all) > top_k:
         totals = pd.Series(
             {f: en_means.get(f, 0.0) + rf_means.get(f, 0.0) for f in features_all}
@@ -1484,7 +1546,6 @@ def stacked_mean_relmae_per_model(
     else:
         features_keep = features_all
 
-    # ---- stacking order ----
     if style_order:
         plot_features = [f for f in style_order if f in features_keep]
         remaining = [f for f in features_keep if f not in plot_features]
@@ -1502,11 +1563,11 @@ def stacked_mean_relmae_per_model(
             reverse=True,
         )
 
-    # ---- heights per feature for EN/RF ----
+    # ---------- heights per feature ----------
     en_heights = np.array([float(en_means.get(f, 0.0)) for f in plot_features])
     rf_heights = np.array([float(rf_means.get(f, 0.0)) for f in plot_features])
 
-    # ---- optional std-based widths (robust) ----
+    # ---------- widths from std, if requested ----------
     if width_by_std:
         en_std = (
             _per_model_feature_std_robust(en_df_filt).reindex(plot_features).fillna(0.0)
@@ -1514,46 +1575,37 @@ def stacked_mean_relmae_per_model(
         rf_std = (
             _per_model_feature_std_robust(rf_df_filt).reindex(plot_features).fillna(0.0)
         )
-        # Build a pseudo-pivot with two columns to leverage your existing helper
         std_piv_like = pd.DataFrame(
             {"EN": en_std.values, "RF": rf_std.values}, index=plot_features
         )
         s_lo, s_hi = _std_widths_setup(
             std_piv_like, q_lo=std_quantiles[0], q_hi=std_quantiles[1]
         )
-        # Map to widths per model per feature
         en_widths = std_to_width(en_std.values, s_lo, s_hi)
         rf_widths = std_to_width(rf_std.values, s_lo, s_hi)
     else:
         en_widths = np.full(len(plot_features), base_width, dtype=float)
         rf_widths = np.full(len(plot_features), base_width, dtype=float)
 
-    # ---- positions and figure ----
-    x = np.array([0, 1])  # positions: EN, RF
+    # ---------- plotting ----------
+    x = np.array([0, 1])  # EN, RF
     fig, ax = plt.subplots(figsize=(6.5, max(4.5, 0.35 * max(1, len(plot_features)))))
 
-    # shared styles
-    style_order_eff = style_order or plot_features
     cmap = color_map or {}
     hmap = hatch_map or {}
 
-    # Features that actually contribute (EN or RF)
     active_features = [
         f
         for f in plot_features
         if en_heights[plot_features.index(f)] > 0
         or rf_heights[plot_features.index(f)] > 0
     ]
-
-    # Legend: alphabetical ascending
     legend_features = sorted(active_features, key=lambda s: s.lower())
-    # Stacking: reverse so bottom segment = last legend entry
     stack_order = list(reversed(legend_features))
 
     bottoms_en = 0.0
     bottoms_rf = 0.0
 
-    # Plot segments in stack order
     for feat in stack_order:
         if feat not in plot_features:
             continue
@@ -1563,7 +1615,7 @@ def stacked_mean_relmae_per_model(
         w_en = en_widths[idx]
         w_rf = rf_widths[idx]
 
-        be = ax.bar(
+        ax.bar(
             x[0],
             h_en,
             width=w_en,
@@ -1573,7 +1625,7 @@ def stacked_mean_relmae_per_model(
             hatch=hmap.get(feat, ""),
             label=feat,
         )
-        br = ax.bar(
+        ax.bar(
             x[1],
             h_rf,
             width=w_rf,
@@ -1586,7 +1638,7 @@ def stacked_mean_relmae_per_model(
         bottoms_en += h_en
         bottoms_rf += h_rf
 
-    # ---- Annotations on top: mean R² (red if negative) and p=<participants> ----
+    # ---------- annotations: mean R² and p ----------
     def _mean_r2_over_participants(model_tag, pids, data_dir):
         r2_means = []
         for pid in pids:
@@ -1609,7 +1661,7 @@ def stacked_mean_relmae_per_model(
     offset = 0.05 * ymax
     line_gap = 0.04 * ymax
 
-    # EN label
+    # EN
     y0 = totals[0]
     if en_mean_r2 is not None and np.isfinite(en_mean_r2):
         ax.text(
@@ -1631,7 +1683,7 @@ def stacked_mean_relmae_per_model(
         color="black",
     )
 
-    # RF label
+    # RF
     y1 = totals[1]
     if rf_mean_r2 is not None and np.isfinite(rf_mean_r2):
         ax.text(
@@ -1653,10 +1705,10 @@ def stacked_mean_relmae_per_model(
         color="black",
     )
 
-    # ---- Axes & legend ----
+    # ---------- axes & legend ----------
     ax.set_xticks(x)
     ax.set_xticklabels(["EN", "RF"])
-    ax.set_ylabel("Relative feature importance")  # concise label, no title
+    ax.set_ylabel("Relative feature importance")
 
     if show_legend and legend_features:
         handles = [
@@ -1676,7 +1728,6 @@ def stacked_mean_relmae_per_model(
             loc="upper left",
         )
 
-    # headroom for annotations
     ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()

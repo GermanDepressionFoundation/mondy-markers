@@ -539,14 +539,17 @@ def across_participants_stacked_positive_relmae(
     hatch_map=None,
     width_by_std=False,
     std_quantiles=(5, 95),
-    min_rel_delta_mae=0.001,  # ignore negligible contributions
-    pseudonym_to_letter=None,  # NEW: optional mapping {pseudonym -> letter}
+    min_rel_delta_mae=None,  # CHANGED: allow None for dynamic threshold
+    rel_threshold_fraction=0.05,  # NEW: 5% of max positive value
+    pseudonym_to_letter=None,  # optional mapping {pseudonym -> letter}
 ):
     """
     Stacked bar plot per participant (pid) with only positive relative MAE contributions.
 
     Features:
       - Filters out rel_delta_mae ≤ min_rel_delta_mae
+      - If min_rel_delta_mae is None, a dynamic threshold is used:
+        rel_threshold_fraction * max(rel_delta_mae > 0)
       - Keeps all participants (even with no visible bars)
       - Optionally uses bar width to reflect std
       - Displays mean R² and fold count (from *_fold_metrics)
@@ -556,6 +559,15 @@ def across_participants_stacked_positive_relmae(
     if df_tidy.empty:
         print(f"No data for {model_tag}; skipping stacked bar.")
         return
+
+    # --- Determine dynamic threshold if requested ---
+    if min_rel_delta_mae is None:
+        pos_vals = df_tidy.loc[df_tidy["rel_delta_mae"] > 0, "rel_delta_mae"].values
+        if pos_vals.size > 0:
+            max_pos = np.nanmax(pos_vals)
+            min_rel_delta_mae = rel_threshold_fraction * max_pos
+        else:
+            min_rel_delta_mae = 0.0  # nothing positive: don't filter out anything
 
     # --- Remember all participants before filtering
     all_pids = df_tidy["pid"].astype(str).tolist()
@@ -810,7 +822,7 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
 
 for model, df in [("EN", df_en), ("RF", df_rf)]:
     out = os.path.join(
-        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot.png"
+        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_2p_stacked_barplot.png"
     )
     across_participants_stacked_positive_relmae(
         df_tidy=df,
@@ -824,12 +836,13 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         color_map=COLOR_MAP,
         hatch_map=HATCH_MAP,
         width_by_std=False,
-        min_rel_delta_mae=0.001,
+        min_rel_delta_mae=None,
+        rel_threshold_fraction=0.02,
     )
     outputs.append(out)
 
     out = os.path.join(
-        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot_std.png"
+        DATA_DIR, f"{model}_pos_rel_delta_mae_greater_2p_stacked_barplot_std.png"
     )
     across_participants_stacked_positive_relmae(
         df_tidy=df,
@@ -843,13 +856,14 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         color_map=COLOR_MAP,
         hatch_map=HATCH_MAP,
         width_by_std=True,
-        min_rel_delta_mae=0.001,
+        min_rel_delta_mae=None,
+        rel_threshold_fraction=0.02,
     )
     outputs.append(out)
 
     out = os.path.join(
         DATA_DIR,
-        f"{model}_pos_rel_delta_mae_greater_0.001_stacked_barplot_std_with_letters.png",
+        f"{model}_pos_rel_delta_mae_greater_2p_stacked_barplot_std_with_letters.png",
     )
     across_participants_stacked_positive_relmae(
         df_tidy=df,
@@ -863,8 +877,9 @@ for model, df in [("EN", df_en), ("RF", df_rf)]:
         color_map=COLOR_MAP,
         hatch_map=HATCH_MAP,
         width_by_std=True,
-        min_rel_delta_mae=0.001,
+        min_rel_delta_mae=None,
         pseudonym_to_letter=PSEUDONYM_TO_LETTER,
+        rel_threshold_fraction=0.02,
     )
     outputs.append(out)
 
@@ -1067,12 +1082,15 @@ def per_participant_stacked_positive(
     hatch_map=None,
     width_by_std=False,  # optional std-based segment widths
     std_quantiles=(5, 95),
-    min_rel_delta_mae=0.001,  # <<< NEW: threshold
+    min_rel_delta_mae=None,  # CHANGED: None -> dynamic
+    rel_threshold_fraction=0.02,  # NEW
 ):
     """
     Stacked bars per fold (x-axis), stacking only positive rel_delta_mae per feature.
     Enhancements:
-      - Filters out rel_delta_mae ≤ min_rel_delta_mae before aggregation
+      - Filters out rel_delta_mae ≤ min_rel_delta_mae
+      - If min_rel_delta_mae is None, a dynamic threshold is used:
+        rel_threshold_fraction * max(rel_delta_mae > 0) for this participant
       - Ensures all folds are on x-axis, even if nothing passes threshold
       - Optional std-based widths (delta_mae_std)
       - Annotates each bar with R² (red if negative) and n (samples)
@@ -1080,6 +1098,15 @@ def per_participant_stacked_positive(
     """
     if df_pid.empty:
         return
+
+    # --- Determine dynamic threshold if requested (per participant) ---
+    if min_rel_delta_mae is None:
+        pos_vals = df_pid.loc[df_pid["rel_delta_mae"] > 0, "rel_delta_mae"].values
+        if pos_vals.size > 0:
+            max_pos = np.nanmax(pos_vals)
+            min_rel_delta_mae = rel_threshold_fraction * max_pos
+        else:
+            min_rel_delta_mae = 0.0
 
     # --- Keep full fold order from the raw df (before filtering)
     fold_order = _order_folds(df_pid)
@@ -1285,7 +1312,7 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
         # Stacked positive bar per fold
         out3 = os.path.join(
             per_pid_dir,
-            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_0.001_stacked.png",
+            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_2per_stacked.png",
         )
         per_participant_stacked_positive(
             df_pid,
@@ -1298,13 +1325,14 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             color_map=COLOR_MAP,
             hatch_map=HATCH_MAP,
             width_by_std=False,
-            min_rel_delta_mae=0.001,
+            min_rel_delta_mae=None,
+            rel_threshold_fraction=0.02,
         )
 
         # Stacked positive bar per fold with std-based widths
         out4 = os.path.join(
             per_pid_dir,
-            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_0.001_stacked_std_widths.png",
+            f"{pid}_{PSEUDONYM_TO_LETTER[pid]}_{model_tag}_pos_rel_delta_mae_greater_2per_stacked_std_widths.png",
         )
         per_participant_stacked_positive(
             df_pid,
@@ -1317,6 +1345,8 @@ for model_tag, pid_map in [("EN", pid_to_df_en_folds), ("RF", pid_to_df_rf_folds
             color_map=COLOR_MAP,
             hatch_map=HATCH_MAP,
             width_by_std=True,
+            min_rel_delta_mae=None,
+            rel_threshold_fraction=0.02,
         )
 
 
@@ -1327,17 +1357,23 @@ def stacked_mean_relmae_per_model(
     style_order=None,
     color_map=None,
     hatch_map=None,
-    min_rel_delta_mae=0.001,
+    min_rel_delta_mae=None,  # CHANGED: allow None for dynamic threshold
+    rel_threshold_fraction=0.05,  # NEW: 5% of max positive value across both models
     top_k=None,  # optional: keep top-K features by total across both models
     show_legend=True,
     data_dir=DATA_DIR,  # to read *_fold_metrics.csv
-    width_by_std=False,  # <<< NEW: encode segment width from std
-    std_quantiles=(5, 95),  # <<< NEW: robust range for width mapping
+    width_by_std=False,  # encode segment width from std
+    std_quantiles=(5, 95),  # robust range for width mapping
     base_width=0.65,  # width when width_by_std=False
 ):
     """
     Two-bar stacked plot (EN, RF). Each stack level is the MEAN relative feature
     importance across participants for that model (positives only, thresholded).
+
+    Threshold behavior:
+      - If min_rel_delta_mae is not None: use it as a fixed cutoff.
+      - If min_rel_delta_mae is None: compute a dynamic threshold as
+        rel_threshold_fraction * max positive rel_delta_mae across both models.
 
     On top of each model bar:
       - R²=<mean of per-participant mean R² over folds> (red if negative)
@@ -1349,12 +1385,32 @@ def stacked_mean_relmae_per_model(
       - Map std -> width with std_to_width
     """
 
+    # ---- Determine dynamic threshold if requested (global across EN+RF) ----
+    if min_rel_delta_mae is None:
+        pos_vals = []
+
+        for df in (df_en_tidy, df_rf_tidy):
+            if df is not None and not df.empty and "rel_delta_mae" in df.columns:
+                vals = df.loc[df["rel_delta_mae"] > 0, "rel_delta_mae"].values
+                if vals.size > 0:
+                    pos_vals.append(vals)
+
+        if pos_vals:
+            all_pos = np.concatenate(pos_vals)
+            if all_pos.size > 0:
+                max_pos = np.nanmax(all_pos)
+                min_rel_delta_mae = rel_threshold_fraction * max_pos
+            else:
+                min_rel_delta_mae = 0.0
+        else:
+            min_rel_delta_mae = 0.0
+
     # ---- helpers ----
-    def _per_model_feature_means_and_pids(df_tidy, min_thr):
+    def _per_model_feature_means_and_pids(df_tidy, thr):
         if df_tidy.empty:
             return pd.Series(dtype=float), [], pd.DataFrame()
         pids = list(dict.fromkeys(df_tidy["pid"].astype(str).tolist()))
-        df = df_tidy[df_tidy["rel_delta_mae"] > min_thr].copy()
+        df = df_tidy[df_tidy["rel_delta_mae"] > thr].copy()
         if df.empty:
             return pd.Series(dtype=float), pids, pd.DataFrame()
         g = (
@@ -1584,8 +1640,8 @@ def stacked_mean_relmae_per_model(
             handles,
             labels,
             title="Feature Group",
-            bbox_to_anchor=(1.02, 1),
-            loc="upper left",
+            bbox_to_anchor=(1.02, 0.7),
+            loc="center left",
         )
         sort_legend_alphanum(ax)
 
@@ -1606,7 +1662,7 @@ def stacked_mean_relmae_per_model(
 
 # 1) Fixed-width version
 out_mean_fixed = os.path.join(
-    DATA_DIR, "EN_RF_mean_pos_relmae_greater_0.001_stacked_fixed.png"
+    DATA_DIR, "EN_RF_mean_pos_relmae_greater_2p_stacked_fixed.png"
 )
 stacked_mean_relmae_per_model(
     df_en_tidy=df_en,
@@ -1615,17 +1671,18 @@ stacked_mean_relmae_per_model(
     style_order=STYLE_ORDER,
     color_map=COLOR_MAP,
     hatch_map=HATCH_MAP,
-    min_rel_delta_mae=0.001,
+    min_rel_delta_mae=None,
     top_k=12,  # optional: keep top K features overall
     show_legend=True,
     data_dir=DATA_DIR,
     width_by_std=False,  # fixed-width segments
+    rel_threshold_fraction=0.02,
 )
 outputs.append(out_mean_fixed)
 
 # 2) Std-encoded widths (robust, 5–95% quantiles)
 out_mean_std = os.path.join(
-    DATA_DIR, "EN_RF_mean_pos_relmae_greater_0.001_stacked_stdwidths.png"
+    DATA_DIR, "EN_RF_mean_pos_relmae_greater_2p_stacked_stdwidths.png"
 )
 stacked_mean_relmae_per_model(
     df_en_tidy=df_en,
@@ -1634,12 +1691,13 @@ stacked_mean_relmae_per_model(
     style_order=STYLE_ORDER,
     color_map=COLOR_MAP,
     hatch_map=HATCH_MAP,
-    min_rel_delta_mae=0.001,
+    min_rel_delta_mae=None,
     top_k=12,
     show_legend=True,
     data_dir=DATA_DIR,
     width_by_std=True,  # <<< enable robust std-based widths
     std_quantiles=(5, 95),  # robust range for width mapping
     base_width=0.65,  # used only if width_by_std=False
+    rel_threshold_fraction=0.02,
 )
 outputs.append(out_mean_std)

@@ -115,27 +115,6 @@ def build_style_map_prefix(groups, preferred_order=None):
     return order, color_map, hatch_map
 
 
-def sort_legend_alphanum(ax):
-    """
-    Sort the legend entries alphanumerically ascending by label text.
-    Works for bar plots and other standard Matplotlib legend types.
-    """
-    handles, labels = ax.get_legend_handles_labels()
-    if not labels:
-        return
-    # Sort alphabetically (case-insensitive)
-    sorted_pairs = sorted(zip(labels, handles), key=lambda x: x[0].lower())
-    labels_sorted, handles_sorted = zip(*sorted_pairs)
-    ax.legend(
-        handles_sorted,
-        labels_sorted,
-        title=ax.get_legend().get_title().get_text() if ax.get_legend() else None,
-        bbox_to_anchor=(1.02, 1),
-        loc="upper left",
-        ncol=1,
-    )
-
-
 def load_fold_metrics(pid, model_tag, data_dir=DATA_DIR):
     """
     Load <pid>_<model>_fold_metrics.csv and return:
@@ -668,11 +647,19 @@ def across_participants_stacked_positive_relmae(
     style_order = style_order or STYLE_ORDER
     color_map = color_map or COLOR_MAP
     hatch_map = hatch_map or HATCH_MAP
+
+    # Features that actually appear and have >0 total
     plot_features = [f for f in style_order if f in features]
+    nonzero_features = [f for f in plot_features if pivot.loc[f].sum() > 0]
+
+    # Legend order: alphabetical ascending
+    legend_features = sorted(nonzero_features, key=lambda s: s.lower())
+    # Stack order: reverse legend so bottom bar = last legend entry
+    stack_order = list(reversed(legend_features))
 
     bottoms = np.zeros(len(pids))
-    if plot_features:
-        for feat in plot_features:
+    if stack_order:
+        for feat in stack_order:
             heights = pivot.loc[feat].values
             if width_by_std:
                 std_vals = std_piv.loc[feat].values
@@ -764,11 +751,25 @@ def across_participants_stacked_positive_relmae(
     )
     ax.set_ylabel("Relative feature importance")
 
-    if plot_features:
+    # --- Legend: alphabetical, matching segment mapping ---
+    if legend_features:
+        handles = [
+            Patch(
+                facecolor=color_map.get(f, "#cccccc"),
+                edgecolor="black",
+                hatch=hatch_map.get(f, ""),
+                label=f,
+            )
+            for f in legend_features
+        ]
         ax.legend(
-            title="Feature Group", bbox_to_anchor=(1.02, 1), loc="upper left", ncol=1
+            handles,
+            legend_features,
+            title="Feature Group",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+            ncol=1,
         )
-        sort_legend_alphanum(ax)
 
     # --- Headroom for labels
     ymax = totals_pid.max() if len(totals_pid) else 0.0
@@ -777,6 +778,7 @@ def across_participants_stacked_positive_relmae(
     ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()
+    # add_logo_to_figure(fig)
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {out_png}")
@@ -1191,18 +1193,24 @@ def per_participant_stacked_positive(
     style_order = style_order or STYLE_ORDER
     color_map = color_map or COLOR_MAP
     hatch_map = hatch_map or HATCH_MAP
+
+    features = piv.index.tolist()
     plot_features = [f for f in style_order if f in features]
+    nonzero_features = [f for f in plot_features if piv.loc[f].sum() > 0]
+
+    legend_features = sorted(nonzero_features, key=lambda s: s.lower())
+    stack_order = list(reversed(legend_features))
 
     # --- std width normalization (robust) if enabled
-    if width_by_std:
+    if width_by_std and stack_order:
         s_lo, s_hi = _std_widths_setup(
             std_piv, q_lo=std_quantiles[0], q_hi=std_quantiles[1]
         )
 
     bottoms = np.zeros(len(fold_order))
 
-    if plot_features:
-        for feat in plot_features:
+    if stack_order:
+        for feat in stack_order:
             heights = piv.loc[feat].reindex(fold_order).values
             if width_by_std:
                 std_vals = (
@@ -1227,7 +1235,6 @@ def per_participant_stacked_positive(
             )
             bottoms += heights
     else:
-        # nothing above threshold -> draw empty baseline bars so x-axis & annotations still show
         ax.bar(x, np.zeros(len(fold_order)), width=0.6, color="none", edgecolor="none")
 
     # --- Annotations: R² (red if negative) and n on top of each fold bar
@@ -1275,9 +1282,23 @@ def per_participant_stacked_positive(
     ax.set_ylabel("Relative feature importance")  # shortened label
     # (no title)
 
-    if plot_features:
-        ax.legend(title="Feature Group", bbox_to_anchor=(1.02, 1), loc="upper left")
-        sort_legend_alphanum(ax)
+    if legend_features:
+        handles = [
+            Patch(
+                facecolor=color_map.get(f, "#cccccc"),
+                edgecolor="black",
+                hatch=hatch_map.get(f, ""),
+                label=f,
+            )
+            for f in legend_features
+        ]
+        ax.legend(
+            handles,
+            legend_features,
+            title="Feature Group",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+        )
 
     # --- Headroom for labels
     ymax = totals_fold.max() if len(totals_fold) else 0.0
@@ -1286,6 +1307,7 @@ def per_participant_stacked_positive(
     ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()
+    # add_logo_to_figure(fig)
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {out_png}")
@@ -1515,20 +1537,32 @@ def stacked_mean_relmae_per_model(
     cmap = color_map or {}
     hmap = hatch_map or {}
 
+    # Features that actually contribute (EN or RF)
+    active_features = [
+        f
+        for f in plot_features
+        if en_heights[plot_features.index(f)] > 0
+        or rf_heights[plot_features.index(f)] > 0
+    ]
+
+    # Legend: alphabetical ascending
+    legend_features = sorted(active_features, key=lambda s: s.lower())
+    # Stacking: reverse so bottom segment = last legend entry
+    stack_order = list(reversed(legend_features))
+
     bottoms_en = 0.0
     bottoms_rf = 0.0
-    bars_for_legend = []
 
-    # Plot segments in consistent feature order
-    for i, feat in enumerate(style_order_eff):
+    # Plot segments in stack order
+    for feat in stack_order:
         if feat not in plot_features:
             continue
-        h_en = en_heights[plot_features.index(feat)]
-        h_rf = rf_heights[plot_features.index(feat)]
-        w_en = en_widths[plot_features.index(feat)]
-        w_rf = rf_widths[plot_features.index(feat)]
+        idx = plot_features.index(feat)
+        h_en = en_heights[idx]
+        h_rf = rf_heights[idx]
+        w_en = en_widths[idx]
+        w_rf = rf_widths[idx]
 
-        # EN segment
         be = ax.bar(
             x[0],
             h_en,
@@ -1537,9 +1571,8 @@ def stacked_mean_relmae_per_model(
             color=cmap.get(feat, "#cccccc"),
             edgecolor="black",
             hatch=hmap.get(feat, ""),
-            label=feat,  # legend handle
+            label=feat,
         )
-        # RF segment
         br = ax.bar(
             x[1],
             h_rf,
@@ -1549,9 +1582,6 @@ def stacked_mean_relmae_per_model(
             edgecolor="black",
             hatch=hmap.get(feat, ""),
         )
-
-        if h_en > 0 or h_rf > 0:
-            bars_for_legend.append((feat, be[0]))
 
         bottoms_en += h_en
         bottoms_rf += h_rf
@@ -1628,28 +1658,28 @@ def stacked_mean_relmae_per_model(
     ax.set_xticklabels(["EN", "RF"])
     ax.set_ylabel("Relative feature importance")  # concise label, no title
 
-    if show_legend and bars_for_legend:
-        seen = set()
-        handles, labels = [], []
-        for feat, handle in bars_for_legend:
-            if feat not in seen:
-                seen.add(feat)
-                labels.append(feat)
-                handles.append(handle)
+    if show_legend and legend_features:
+        handles = [
+            Patch(
+                facecolor=cmap.get(f, "#cccccc"),
+                edgecolor="black",
+                hatch=hmap.get(f, ""),
+                label=f,
+            )
+            for f in legend_features
+        ]
         ax.legend(
             handles,
-            labels,
+            legend_features,
             title="Feature Group",
-            bbox_to_anchor=(1.02, 0.7),
-            loc="center left",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
         )
-        sort_legend_alphanum(ax)
 
     # headroom for annotations
     ax.set_ylim(0, ymax * 1.35)
 
     fig.tight_layout()
-    add_logo_to_figure(fig)
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.close(fig)

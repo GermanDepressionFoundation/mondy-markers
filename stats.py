@@ -1,4 +1,5 @@
 import json
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -6,11 +7,25 @@ import pandas as pd
 import seaborn as sns
 from IPython.display import Markdown, display
 
+from data_analysis_TimeSeriesSplit import (
+    FEATURES_TO_CONSIDER,
+    PHQ2_COLUMN,
+    RESULTS_DIR,
+    days_since_start,
+)
+
 sns.set_style("whitegrid")
 sns.set_palette("colorblind")
 
 # --- Load & clean data ---
-df_raw = pd.read_pickle("data/df_merged_v3.pickle")
+df_raw = pd.read_pickle("data/df_merged_mnar_v11 1.pickle")
+df_raw["day_of_week"] = df_raw["timestamp_utc"].dt.weekday
+df_raw["month_of_year"] = df_raw["timestamp_utc"].dt.month
+df_raw["day_since_start"] = df_raw.groupby("patient_id", group_keys=False).apply(
+    days_since_start
+)
+df_raw = df_raw[["patient_id", "timestamp_utc", PHQ2_COLUMN] + FEATURES_TO_CONSIDER]
+
 
 # Map IDs to pseudonyms
 json_file_path = "config/id_to_pseudonym.json"
@@ -33,14 +48,18 @@ df_raw = df_raw.sort_values(by=["pseudonym", "timestamp_utc"])
 first_dates = df_raw.groupby("pseudonym")["timestamp_utc"].transform("min")
 
 # Compute days since first timestamp
-df_raw["days_since_start"] = (df_raw["timestamp_utc"] - first_dates).dt.days
+# df_raw["days_since_start"] = (df_raw["timestamp_utc"] - first_dates).dt.days
 
 # Keep only rows within first 365 days
-df_raw = df_raw[df_raw["days_since_start"] <= 364]
+# df_raw = df_raw[df_raw["days_since_start"] <= 364]
 
-df_raw = df_raw.drop(
-    columns=["timestamp_utc", "woche_PHQ9_sum", "patient_id", "days_since_start"]
-)
+feature_config = pd.read_csv("config/feature_config_v11_final.csv")
+LOG1P_COLS = feature_config[feature_config["scaler"] == "log1p"]["feature"].tolist()
+ZSCORE_COLS = feature_config[feature_config["scaler"] == "zscore"]["feature"].tolist()
+MINMAX_COLS = feature_config[feature_config["scaler"] == "minmax"]["feature"].tolist()
+FEATURES_TO_CONSIDER = feature_config["feature"].tolist()
+
+df_raw = df_raw.drop(columns=["timestamp_utc", "patient_id"])
 
 # --- Group by participant ---
 grouped = df_raw.groupby("pseudonym")
@@ -76,9 +95,10 @@ for col in df_raw.columns:
     )
 
 stats_df = pd.DataFrame(stats_data)
+stats_df = stats_df.round(3)
 
 # Save feature-level summary
-stats_df.to_csv("results/df_raw_column_stats.csv", index=False)
+stats_df.to_csv(os.path.join(RESULTS_DIR, "df_raw_column_stats.csv"), index=False)
 print("Saved column stats to results/df_raw_column_stats.csv")
 
 # Display in notebook
@@ -108,10 +128,13 @@ missing_ratio.columns = [f"{col}_missing_ratio" for col in missing_ratio.columns
 
 # Combine everything, including total sample count
 participant_stats_full = pd.concat([participant_stats, missing_ratio], axis=1)
+participant_stats_full = participant_stats_full.round(3)
 participant_stats_full["total_samples"] = total_counts
 
 # Save to CSV
-participant_stats_full.to_csv("results/per_participant_feature_stats.csv")
+participant_stats_full.to_csv(
+    os.path.join(RESULTS_DIR, "per_participant_feature_stats.csv")
+)
 print(
     "Saved per-participant stats with missing ratios to results/per_participant_feature_stats.csv"
 )
@@ -160,6 +183,6 @@ plt.xticks(rotation=90)
 plt.xlabel("Participant")
 plt.ylabel("abend_PHQ2_sum")
 plt.tight_layout()
-plt.savefig("results/abend_PHQ2_sum_variation.png", dpi=300)
+plt.savefig(os.path.join(RESULTS_DIR, "abend_PHQ2_sum_variation.png"), dpi=300)
 plt.show()
-print("✅ Saved plot: results/abend_PHQ2_sum_variation.png")
+print("✅ Saved plot: abend_PHQ2_sum_variation.png")

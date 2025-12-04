@@ -11,3 +11,4 @@ results*/*.json
 .mondy_markers/
 *.log
 *.joblib
+*.txt

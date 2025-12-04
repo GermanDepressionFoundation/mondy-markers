@@ -9,6 +9,7 @@ import pandas as pd
 from matplotlib import cm
 from matplotlib.colors import Normalize, to_rgb
 from matplotlib.patches import Patch
+from scipy.stats import wilcoxon
 
 from utils import PSEUDONYM_TO_LETTER, add_logo_to_figure
 
@@ -1566,6 +1567,27 @@ def stacked_mean_relmae_per_model(
     # ---------- heights per feature ----------
     en_heights = np.array([float(en_means.get(f, 0.0)) for f in plot_features])
     rf_heights = np.array([float(rf_means.get(f, 0.0)) for f in plot_features])
+
+    # Only keep features where at least one model has non-zero importance
+    mask = (en_heights > 0) | (rf_heights > 0)
+    en_vals = en_heights[mask]
+    rf_vals = rf_heights[mask]
+
+    wilcoxon_result_path = os.path.splitext(out_png)[0] + "_wilcoxon.txt"
+
+    if len(en_vals) > 0 and len(rf_vals) > 0:
+        try:
+            stat, p_value = wilcoxon(rf_vals, en_vals, alternative="greater")
+            with open(wilcoxon_result_path, "w") as f:
+                f.write("Wilcoxon Signed-Rank Test (RF > EN)\n")
+                f.write(f"Number of paired features: {len(en_vals)}\n")
+                f.write(f"Statistic: {stat}\n")
+                f.write(f"P-value: {p_value}\n")
+            print(f"Saved Wilcoxon test results to: {wilcoxon_result_path}")
+        except Exception as e:
+            print(f"Wilcoxon test failed: {e}")
+    else:
+        print("Wilcoxon test not performed: no non-zero paired feature importances.")
 
     # ---------- widths from std, if requested ----------
     if width_by_std:
